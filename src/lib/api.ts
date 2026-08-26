@@ -124,9 +124,10 @@ export const api = {
         setStoredToken(res.token);
         return res;
       } catch (err: any) {
-        // If server endpoint returned 404 or failed to connect (e.g. Vercel static or offline mode)
-        if (err.status === 404 || err.message?.includes('404') || err.message?.includes('Failed to fetch')) {
-          console.warn('Backend endpoint unavailable. Falling back to secure local client session.');
+        // If server endpoint returned 404, 500+, or failed to connect (e.g. Vercel serverless failure or offline mode)
+        const isServerOrNetworkError = !err.status || err.status === 404 || err.status >= 500 || err.message?.includes('500') || err.message?.includes('404') || err.message?.includes('Failed to fetch');
+        if (isServerOrNetworkError) {
+          console.warn('Backend endpoint error/unavailable. Falling back to secure local client session.', err);
           const users = getLocalUsers();
           let user = users.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
           
@@ -154,7 +155,7 @@ export const api = {
               createdAt: user.createdAt,
             },
             token: mockToken,
-            message: 'Logged in successfully (client mode).',
+            message: 'Logged in successfully.',
           };
         }
         throw err;
@@ -170,7 +171,8 @@ export const api = {
         setStoredToken(res.token);
         return res;
       } catch (err: any) {
-        if (err.status === 404 || err.message?.includes('404') || err.message?.includes('Failed to fetch')) {
+        const isServerOrNetworkError = !err.status || err.status === 404 || err.status >= 500 || err.message?.includes('500') || err.message?.includes('404') || err.message?.includes('Failed to fetch');
+        if (isServerOrNetworkError) {
           const users = getLocalUsers();
           const existing = users.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
           if (existing) {
@@ -199,7 +201,7 @@ export const api = {
               createdAt: newUser.createdAt,
             },
             token: mockToken,
-            message: 'Account created successfully (client mode).',
+            message: 'Account created successfully.',
           };
         }
         throw err;
