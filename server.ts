@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { authRouter } from './server/authRoutes';
 import { meetingRouter } from './server/meetingRoutes';
 import { aiRouter } from './server/aiRoutes';
+import { signalingRouter, signalingManager, SignalingMessage } from './server/signalingManager';
 import { storage } from './server/storage';
 import { createServer as createViteServer } from 'vite';
 
@@ -38,28 +39,14 @@ app.get('/api/ready', (req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/meetings', meetingRouter);
 app.use('/api/ai', aiRouter);
+app.use('/api/signaling', signalingRouter);
+app.use('/api/meetings/signaling', signalingRouter);
 
 // Create HTTP Server
 const server = http.createServer(app);
 
 // Initialize WebSocket Signaling Server
 const wss = new WebSocketServer({ server, path: '/ws/signaling' });
-
-interface ClientSession {
-  ws: WebSocket;
-  participantId: string;
-  meetingCode: string;
-  displayName: string;
-  isHost: boolean;
-  avatarUrl?: string;
-  audioEnabled: boolean;
-  videoEnabled: boolean;
-  screenSharing: boolean;
-  handRaised: boolean;
-  inWaitingRoom: boolean;
-}
-
-const rooms = new Map<string, Map<string, ClientSession>>();
 
 wss.on('connection', (ws: WebSocket) => {
   let currentRoomCode = '';
@@ -77,74 +64,24 @@ wss.on('connection', (ws: WebSocket) => {
           currentRoomCode = (meetingCode || 'default-room').toLowerCase().trim();
           currentParticipantId = payload.participantId || `usr_${Math.random().toString(36).substring(2, 9)}`;
 
-          if (!rooms.has(currentRoomCode)) {
-            rooms.set(currentRoomCode, new Map());
-          }
-
-          const room = rooms.get(currentRoomCode)!;
-          const isFirst = room.size === 0;
-
-          const session: ClientSession = {
-            ws,
-            participantId: currentParticipantId,
-            meetingCode: currentRoomCode,
-            displayName: payload.displayName || 'Attendee',
-            isHost: payload.isHost ?? isFirst,
+          const result = signalingManager.joinRoom(currentRoomCode, {
+            id: currentParticipantId,
+            displayName: payload.displayName,
             avatarUrl: payload.avatarUrl,
-            audioEnabled: payload.audioEnabled ?? true,
-            videoEnabled: payload.videoEnabled ?? true,
-            screenSharing: false,
-            handRaised: false,
-            inWaitingRoom: payload.inWaitingRoom ?? false,
-          };
-
-          room.set(currentParticipantId, session);
-
-          // Notify existing participants of new peer
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'PEER_JOINED',
-                meetingCode: currentRoomCode,
-                payload: {
-                  participant: {
-                    id: session.participantId,
-                    displayName: session.displayName,
-                    avatarUrl: session.avatarUrl,
-                    isHost: session.isHost,
-                    audioEnabled: session.audioEnabled,
-                    videoEnabled: session.videoEnabled,
-                    screenSharing: session.screenSharing,
-                    handRaised: session.handRaised,
-                    inWaitingRoom: session.inWaitingRoom,
-                  },
-                },
-              }));
-            }
+            isHost: payload.isHost,
+            audioEnabled: payload.audioEnabled,
+            videoEnabled: payload.videoEnabled,
+            inWaitingRoom: payload.inWaitingRoom,
+            ws,
           });
-
-          // Send list of current peers to the joining client
-          const existingParticipants = Array.from(room.values())
-            .filter(c => c.participantId !== currentParticipantId)
-            .map(c => ({
-              id: c.participantId,
-              displayName: c.displayName,
-              avatarUrl: c.avatarUrl,
-              isHost: c.isHost,
-              audioEnabled: c.audioEnabled,
-              videoEnabled: c.videoEnabled,
-              screenSharing: c.screenSharing,
-              handRaised: c.handRaised,
-              inWaitingRoom: c.inWaitingRoom,
-            }));
 
           ws.send(JSON.stringify({
             type: 'ROOM_JOINED',
             meetingCode: currentRoomCode,
             payload: {
               participantId: currentParticipantId,
-              isHost: session.isHost,
-              participants: existingParticipants,
+              isHost: result.isHost,
+              participants: result.participants,
             },
           }));
           break;
@@ -153,292 +90,232 @@ wss.on('connection', (ws: WebSocket) => {
         case 'SIGNAL_OFFER':
         case 'SIGNAL_ANSWER':
         case 'SIGNAL_ICE_CANDIDATE': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
-          const targetPeer = room.get(payload.targetPeerId);
-          if (targetPeer && targetPeer.ws.readyState === WebSocket.OPEN) {
-            targetPeer.ws.send(JSON.stringify({
-              type,
-              meetingCode: currentRoomCode,
-              payload: {
-                senderPeerId: currentParticipantId,
-                ...payload,
-              },
-            }));
-          }
+          signalingManager.routeMessage({
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type,
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            targetPeerId: payload.targetPeerId,
+            payload: {
+              senderPeerId: currentParticipantId,
+              ...payload,
+            },
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'MEDIA_STATE_CHANGED': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
-          const session = room.get(currentParticipantId);
-          if (session) {
-            if (payload.audioEnabled !== undefined) session.audioEnabled = payload.audioEnabled;
-            if (payload.videoEnabled !== undefined) session.videoEnabled = payload.videoEnabled;
-            if (payload.screenSharing !== undefined) session.screenSharing = payload.screenSharing;
-            if (payload.handRaised !== undefined) session.handRaised = payload.handRaised;
-
-            // Broadcast state update to everyone in room
-            room.forEach((client) => {
-              if (client.ws.readyState === WebSocket.OPEN) {
-                client.ws.send(JSON.stringify({
-                  type: 'PEER_MEDIA_STATE_CHANGED',
-                  meetingCode: currentRoomCode,
-                  payload: {
-                    participantId: currentParticipantId,
-                    audioEnabled: session.audioEnabled,
-                    videoEnabled: session.videoEnabled,
-                    screenSharing: session.screenSharing,
-                    handRaised: session.handRaised,
-                  },
-                }));
-              }
-            });
-          }
+          signalingManager.routeMessage({
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'PEER_MEDIA_STATE_CHANGED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {
+              participantId: currentParticipantId,
+              ...payload,
+            },
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'CHAT_MESSAGE': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
-          if (!session) return;
 
           const savedMessage = storage.addMessage({
             meetingCode: currentRoomCode,
-            senderId: session.participantId,
-            senderName: session.displayName,
-            senderAvatar: session.avatarUrl,
+            senderId: currentParticipantId,
+            senderName: session?.displayName || payload.senderName || 'Attendee',
+            senderAvatar: session?.avatarUrl || payload.senderAvatar,
             text: payload.text,
             isPrivate: payload.isPrivate,
             recipientId: payload.recipientId,
           });
 
-          if (payload.isPrivate && payload.recipientId) {
-            // Private message: Send only to recipient and sender
-            const recipient = room.get(payload.recipientId);
-            if (recipient && recipient.ws.readyState === WebSocket.OPEN) {
-              recipient.ws.send(JSON.stringify({
-                type: 'CHAT_MESSAGE_RECEIVED',
-                meetingCode: currentRoomCode,
-                payload: { message: savedMessage },
-              }));
-            }
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: 'CHAT_MESSAGE_RECEIVED',
-                meetingCode: currentRoomCode,
-                payload: { message: savedMessage },
-              }));
-            }
-          } else {
-            // Broadcast to all participants
-            room.forEach((client) => {
-              if (client.ws.readyState === WebSocket.OPEN) {
-                client.ws.send(JSON.stringify({
-                  type: 'CHAT_MESSAGE_RECEIVED',
-                  meetingCode: currentRoomCode,
-                  payload: { message: savedMessage },
-                }));
-              }
-            });
-          }
+          signalingManager.routeMessage({
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'CHAT_MESSAGE_RECEIVED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            targetPeerId: payload.isPrivate ? payload.recipientId : undefined,
+            payload: { message: savedMessage },
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'REACTION': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
-          room.forEach((client) => {
-            if (client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'REACTION_RECEIVED',
-                meetingCode: currentRoomCode,
-                payload: {
-                  participantId: currentParticipantId,
-                  displayName: session?.displayName || 'Attendee',
-                  emoji: payload.emoji,
-                },
-              }));
-            }
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'REACTION_RECEIVED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {
+              participantId: currentParticipantId,
+              displayName: session?.displayName || 'Attendee',
+              emoji: payload.emoji,
+            },
+            timestamp: Date.now(),
           });
           break;
         }
 
         case 'WHITEBOARD_STROKE': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'WHITEBOARD_STROKE_RECEIVED',
-                meetingCode: currentRoomCode,
-                payload: {
-                  participantId: currentParticipantId,
-                  stroke: payload.stroke,
-                },
-              }));
-            }
-          });
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'WHITEBOARD_STROKE_RECEIVED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {
+              participantId: currentParticipantId,
+              stroke: payload.stroke,
+            },
+            timestamp: Date.now(),
+          }, currentParticipantId);
           break;
         }
 
         case 'WHITEBOARD_CLEAR': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'WHITEBOARD_CLEAR_RECEIVED',
-                meetingCode: currentRoomCode,
-              }));
-            }
-          });
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'WHITEBOARD_CLEAR_RECEIVED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {},
+            timestamp: Date.now(),
+          }, currentParticipantId);
           break;
         }
 
         case 'TRANSCRIPT_ENTRY': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'TRANSCRIPT_ENTRY_RECEIVED',
-                meetingCode: currentRoomCode,
-                payload: {
-                  id: payload.id || `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                  speakerId: currentParticipantId,
-                  speakerName: session?.displayName || payload.speakerName || 'Attendee',
-                  text: payload.text,
-                  timestamp: payload.timestamp || new Date().toISOString(),
-                  isFinal: payload.isFinal ?? true,
-                },
-              }));
-            }
-          });
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'TRANSCRIPT_ENTRY_RECEIVED',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {
+              id: payload.id || `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              speakerId: currentParticipantId,
+              speakerName: session?.displayName || payload.speakerName || 'Attendee',
+              text: payload.text,
+              timestamp: payload.timestamp || new Date().toISOString(),
+              isFinal: payload.isFinal ?? true,
+            },
+            timestamp: Date.now(),
+          }, currentParticipantId);
           break;
         }
 
         case 'AUDIO_SPEAKING_UPDATE': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'PEER_SPEAKING_UPDATE',
-                meetingCode: currentRoomCode,
-                payload: {
-                  participantId: currentParticipantId,
-                  isSpeaking: payload.isSpeaking,
-                  audioLevel: payload.audioLevel,
-                },
-              }));
-            }
-          });
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'PEER_SPEAKING_UPDATE',
+            meetingCode: currentRoomCode,
+            senderPeerId: currentParticipantId,
+            payload: {
+              participantId: currentParticipantId,
+              isSpeaking: payload.isSpeaking,
+              audioLevel: payload.audioLevel,
+            },
+            timestamp: Date.now(),
+          }, currentParticipantId);
           break;
         }
 
         case 'ADMIT_PEER': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
-          if (!session?.isHost) return; // Only host can admit
+          if (!session?.isHost) return;
 
           const target = room.get(payload.targetPeerId);
           if (target) {
             target.inWaitingRoom = false;
-            if (target.ws.readyState === WebSocket.OPEN) {
-              target.ws.send(JSON.stringify({
-                type: 'ADMITTED_TO_ROOM',
-                meetingCode: currentRoomCode,
-              }));
-            }
+            signalingManager.deliverToParticipant(currentRoomCode, payload.targetPeerId, {
+              id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              type: 'ADMITTED_TO_ROOM',
+              meetingCode: currentRoomCode,
+              payload: {},
+              timestamp: Date.now(),
+            });
 
-            // Broadcast peer joined to everyone
-            room.forEach((client) => {
-              if (client.ws.readyState === WebSocket.OPEN) {
-                client.ws.send(JSON.stringify({
-                  type: 'PEER_JOINED',
-                  meetingCode: currentRoomCode,
-                  payload: {
-                    participant: {
-                      id: target.participantId,
-                      displayName: target.displayName,
-                      avatarUrl: target.avatarUrl,
-                      isHost: target.isHost,
-                      audioEnabled: target.audioEnabled,
-                      videoEnabled: target.videoEnabled,
-                      screenSharing: target.screenSharing,
-                      handRaised: target.handRaised,
-                      inWaitingRoom: false,
-                    },
-                  },
-                }));
-              }
+            signalingManager.broadcastToRoom(currentRoomCode, {
+              id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              type: 'PEER_JOINED',
+              meetingCode: currentRoomCode,
+              payload: {
+                participant: {
+                  id: target.id,
+                  displayName: target.displayName,
+                  avatarUrl: target.avatarUrl,
+                  isHost: target.isHost,
+                  audioEnabled: target.audioEnabled,
+                  videoEnabled: target.videoEnabled,
+                  screenSharing: target.screenSharing,
+                  handRaised: target.handRaised,
+                  inWaitingRoom: false,
+                },
+              },
+              timestamp: Date.now(),
             });
           }
           break;
         }
 
         case 'KICK_PEER': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
-          if (!session?.isHost) return; // Only host can kick
+          if (!session?.isHost) return;
 
-          const target = room.get(payload.targetPeerId);
-          if (target && target.ws.readyState === WebSocket.OPEN) {
-            target.ws.send(JSON.stringify({
-              type: 'KICKED_FROM_ROOM',
-              meetingCode: currentRoomCode,
-              payload: { reason: 'Removed by host' },
-            }));
-          }
-          handleLeave(currentRoomCode, payload.targetPeerId);
+          signalingManager.deliverToParticipant(currentRoomCode, payload.targetPeerId, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'KICKED_FROM_ROOM',
+            meetingCode: currentRoomCode,
+            payload: { reason: 'Removed by host' },
+            timestamp: Date.now(),
+          });
+          signalingManager.leaveRoom(currentRoomCode, payload.targetPeerId);
           break;
         }
 
         case 'MUTE_ALL': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
           if (!session?.isHost) return;
 
-          room.forEach((client, peerId) => {
-            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'FORCE_MUTE_AUDIO',
-                meetingCode: currentRoomCode,
-              }));
-            }
-          });
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'FORCE_MUTE_AUDIO',
+            meetingCode: currentRoomCode,
+            payload: {},
+            timestamp: Date.now(),
+          }, currentParticipantId);
           break;
         }
 
         case 'END_MEETING': {
-          const room = rooms.get(currentRoomCode);
-          if (!room) return;
+          const room = signalingManager.getRoom(currentRoomCode);
           const session = room.get(currentParticipantId);
           if (!session?.isHost) return;
 
-          room.forEach((client) => {
-            if (client.ws.readyState === WebSocket.OPEN) {
-              client.ws.send(JSON.stringify({
-                type: 'MEETING_ENDED_BY_HOST',
-                meetingCode: currentRoomCode,
-              }));
-            }
+          signalingManager.broadcastToRoom(currentRoomCode, {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: 'MEETING_ENDED_BY_HOST',
+            meetingCode: currentRoomCode,
+            payload: {},
+            timestamp: Date.now(),
           });
-          rooms.delete(currentRoomCode);
           break;
         }
 
         case 'LEAVE_ROOM': {
           if (currentRoomCode && currentParticipantId) {
-            handleLeave(currentRoomCode, currentParticipantId);
+            signalingManager.leaveRoom(currentRoomCode, currentParticipantId);
           }
           break;
         }
@@ -451,29 +328,9 @@ wss.on('connection', (ws: WebSocket) => {
     }
   });
 
-  const handleLeave = (roomCode: string, participantId: string) => {
-    const room = rooms.get(roomCode);
-    if (!room) return;
-    room.delete(participantId);
-
-    room.forEach((client) => {
-      if (client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(JSON.stringify({
-          type: 'PEER_LEFT',
-          meetingCode: roomCode,
-          payload: { participantId },
-        }));
-      }
-    });
-
-    if (room.size === 0) {
-      rooms.delete(roomCode);
-    }
-  };
-
   ws.on('close', () => {
     if (currentRoomCode && currentParticipantId) {
-      handleLeave(currentRoomCode, currentParticipantId);
+      signalingManager.leaveRoom(currentRoomCode, currentParticipantId);
     }
   });
 });

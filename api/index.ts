@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { authRouter } from '../server/authRoutes';
 import { meetingRouter } from '../server/meetingRoutes';
 import { aiRouter } from '../server/aiRoutes';
+import { signalingRouter } from '../server/signalingManager';
 
 const app = express();
 
@@ -46,6 +47,10 @@ app.use('/meetings', meetingRouter);
 
 app.use('/api/ai', aiRouter);
 app.use('/ai', aiRouter);
+
+app.use('/api/signaling', signalingRouter);
+app.use('/signaling', signalingRouter);
+app.use('/api/meetings/signaling', signalingRouter);
 
 // Generic Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
