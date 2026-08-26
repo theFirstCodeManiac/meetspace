@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@keyframes reactionFloat {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.6);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0) scale(1.15);
+  }
+  80% {
+    opacity: 0.9;
+    transform: translateY(-200px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-280px) scale(0.8);
+  }
+}
+
+.animate-reaction-float {
+  animation: reactionFloat 2.8s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Smooth custom scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+

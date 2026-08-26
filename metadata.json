@@ -1,0 +1,7 @@
+{
+  "name": "MeetSpace Video Conferencing",
+  "description": "Enterprise-grade real-time video conferencing platform with WebRTC peer-to-peer media, WebSocket signaling, screen sharing, Gemini 3.7 Flash AI Copilot, live transcription, closed captions, collaborative whiteboard canvas, and local session recording.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
