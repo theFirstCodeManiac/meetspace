@@ -77,7 +77,7 @@ export const AICopilotDrawer: React.FC<AICopilotDrawerProps> = ({ isOpen, onClos
             <div className="flex items-center gap-1.5">
               <h2 className="text-sm font-semibold text-white">AI Meeting Copilot</h2>
               <span className="px-1.5 py-0.2 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-bold">
-                Gemini 3.7
+                Gemini 2.5 Flash
               </span>
             </div>
             <p className="text-[11px] text-slate-400">Context-aware meeting intelligence</p>

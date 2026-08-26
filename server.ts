@@ -303,8 +303,8 @@ wss.on('connection', (ws: WebSocket) => {
           const room = rooms.get(currentRoomCode);
           if (!room) return;
           const session = room.get(currentParticipantId);
-          room.forEach((client) => {
-            if (client.ws.readyState === WebSocket.OPEN) {
+          room.forEach((client, peerId) => {
+            if (peerId !== currentParticipantId && client.ws.readyState === WebSocket.OPEN) {
               client.ws.send(JSON.stringify({
                 type: 'TRANSCRIPT_ENTRY_RECEIVED',
                 meetingCode: currentRoomCode,

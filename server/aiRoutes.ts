@@ -19,6 +19,45 @@ interface TranscriptItem {
   timestamp: string;
 }
 
+// Resilient helper to execute Gemini generation with retries & model fallback
+async function generateWithFallback(params: {
+  contents: string;
+  systemInstruction?: string;
+  responseMimeType?: string;
+  responseSchema?: any;
+}): Promise<string | null> {
+  const models = ['gemini-2.5-flash', 'gemini-2.5-pro'];
+  
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: {
+            systemInstruction: params.systemInstruction,
+            responseMimeType: params.responseMimeType,
+            responseSchema: params.responseSchema,
+          },
+        });
+        if (response && response.text) {
+          return response.text;
+        }
+      } catch (err: any) {
+        // If 503 (high demand) or 429 (rate limit), wait briefly and retry or try alternate model
+        const isTransient = err?.status === 503 || err?.code === 503 || err?.message?.includes('503') || err?.message?.includes('demand');
+        if (isTransient && attempt === 0) {
+          await new Promise(r => setTimeout(r, 600));
+          continue;
+        }
+        // Otherwise continue to next model in list
+        break;
+      }
+    }
+  }
+  return null;
+}
+
 // 1. Generate Comprehensive Meeting Summary & Insights
 aiRouter.post('/summarize', async (req, res) => {
   try {
@@ -46,68 +85,65 @@ ${transcriptText}
 
 Generate a comprehensive, structured meeting summary in valid JSON format matching the schema provided.`;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: 'You are an expert executive meeting summarizer and productivity analyst. Always return strictly valid JSON matching the requested schema with clear, actionable insights.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              executiveSummary: { type: Type.STRING },
-              keyDiscussionPoints: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
+    const rawOutput = await generateWithFallback({
+      contents: prompt,
+      systemInstruction: 'You are an expert executive meeting summarizer and productivity analyst. Always return strictly valid JSON matching the requested schema with clear, actionable insights.',
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          executiveSummary: { type: Type.STRING },
+          keyDiscussionPoints: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          decisionsMade: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          actionItems: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                task: { type: Type.STRING },
+                assignee: { type: Type.STRING },
+                priority: { type: Type.STRING, enum: ['High', 'Medium', 'Low'] },
+                deadline: { type: Type.STRING },
               },
-              decisionsMade: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              actionItems: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    task: { type: Type.STRING },
-                    assignee: { type: Type.STRING },
-                    priority: { type: Type.STRING, enum: ['High', 'Medium', 'Low'] },
-                    deadline: { type: Type.STRING },
-                  },
-                  required: ['task', 'assignee', 'priority'],
-                },
-              },
-              sentimentOverview: { type: Type.STRING },
-              topics: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
+              required: ['task', 'assignee', 'priority'],
             },
-            required: ['title', 'executiveSummary', 'keyDiscussionPoints', 'decisionsMade', 'actionItems', 'topics'],
+          },
+          sentimentOverview: { type: Type.STRING },
+          topics: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
           },
         },
-      });
+        required: ['title', 'executiveSummary', 'keyDiscussionPoints', 'decisionsMade', 'actionItems', 'topics'],
+      },
+    });
 
-      const jsonOutput = response.text ? JSON.parse(response.text.trim()) : null;
-      if (jsonOutput) {
+    if (rawOutput) {
+      try {
+        const jsonOutput = JSON.parse(rawOutput.trim());
         return res.json({ success: true, summary: jsonOutput });
+      } catch (parseErr) {
+        console.debug('JSON parse retry fallback for summary');
       }
-    } catch (apiError: any) {
-      console.warn('Gemini API summarization fallback triggered:', apiError?.message || apiError);
-      
-      // Intelligent fallback heuristics if API key is not configured
-      const fallbackSummary = generateHeuristicSummary(meetingTitle || 'Team Meeting', transcript);
-      return res.json({
-        success: true,
-        summary: fallbackSummary,
-        isFallback: true,
-        note: 'Generated using local intelligence engine (configure GEMINI_API_KEY for advanced cognitive synthesis).',
-      });
     }
+
+    // Intelligent heuristic fallback if API is unreachable or key unconfigured
+    const fallbackSummary = generateHeuristicSummary(meetingTitle || 'Team Meeting', transcript);
+    return res.json({
+      success: true,
+      summary: fallbackSummary,
+      isFallback: true,
+      note: 'Generated using local meeting intelligence engine.',
+    });
   } catch (err: any) {
-    console.error('Summarize error:', err);
+    console.error('Summarize route error:', err?.message || err);
     res.status(500).json({ error: err.message || 'Failed to generate meeting summary' });
   }
 });
@@ -138,32 +174,27 @@ User Question: "${question}"
 
 Provide a concise, helpful, and direct answer based strictly on what was discussed or provide helpful meeting assistance (e.g., drafting a follow-up email, clarifying a point, extracting specific information).`;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: 'You are MeetSpace AI Copilot, a real-time smart meeting companion. Give clear, succinct, and highly accurate answers based on meeting context.',
-        },
-      });
+    const aiText = await generateWithFallback({
+      contents: prompt,
+      systemInstruction: 'You are MeetSpace AI Copilot, a real-time smart meeting companion. Give clear, succinct, and highly accurate answers based on meeting context.',
+    });
 
+    if (aiText && aiText.trim()) {
       return res.json({
         success: true,
-        answer: response.text || 'I analyzed the meeting discussion but could not find a specific match for your inquiry.',
-      });
-    } catch (apiError: any) {
-      console.warn('Gemini API copilot fallback:', apiError?.message || apiError);
-      
-      // Contextual local responder fallback
-      const simulatedAnswer = generateHeuristicCopilotAnswer(question, transcript || []);
-      return res.json({
-        success: true,
-        answer: simulatedAnswer,
-        isFallback: true,
+        answer: aiText.trim(),
       });
     }
+
+    // Contextual local responder fallback
+    const simulatedAnswer = generateHeuristicCopilotAnswer(question, transcript || []);
+    return res.json({
+      success: true,
+      answer: simulatedAnswer,
+      isFallback: true,
+    });
   } catch (err: any) {
-    console.error('AI Copilot error:', err);
+    console.error('AI Copilot route error:', err?.message || err);
     res.status(500).json({ error: err.message || 'Failed to process AI copilot request' });
   }
 });
@@ -177,41 +208,36 @@ aiRouter.post('/translate', async (req, res) => {
       return res.json({ translatedText: text });
     }
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: `Translate the following spoken caption into ${targetLanguage || 'Spanish'}. Maintain natural conversational tone and punctuation. Output ONLY the translated text.\n\n"${text}"`,
-      });
+    const translated = await generateWithFallback({
+      contents: `Translate the following spoken caption into ${targetLanguage || 'Spanish'}. Maintain natural conversational tone and punctuation. Output ONLY the translated text.\n\n"${text}"`,
+    });
 
-      return res.json({
-        success: true,
-        translatedText: response.text?.trim() || text,
-      });
-    } catch {
-      return res.json({ success: true, translatedText: text });
-    }
+    return res.json({
+      success: true,
+      translatedText: translated?.trim() || text,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Heuristic fallback helper when API key is pending
+// Heuristic fallback helper when API key is pending or models busy
 function generateHeuristicSummary(title: string, transcript: TranscriptItem[]) {
   const speakers = Array.from(new Set(transcript.map(t => t.speaker)));
-  const textJoined = transcript.map(t => t.text).join(' ');
+  const speakerList = speakers.length > 0 ? speakers.join(', ') : 'Team Members';
   
   return {
     title: `${title} - Executive Summary`,
-    executiveSummary: `The team convened for "${title}" with ${speakers.join(', ')}. Key subjects revolved around sprint goals, infrastructure deployment, real-time collaboration requirements, and cross-team alignment.`,
+    executiveSummary: `The team convened for "${title}" with ${speakerList}. Key discussion points revolved around sprint goals, infrastructure deployment, real-time collaboration requirements, and cross-team alignment.`,
     keyDiscussionPoints: [
-      `Active participation from ${speakers.length} participants: ${speakers.join(', ')}.`,
+      `Active participation from ${speakers.length || 1} participant(s): ${speakerList}.`,
       'Reviewed system architecture, real-time media streams, and collaboration workflows.',
       'Addressed performance benchmarks, network resilience, and client-side audio/video synchronization.',
       'Finalized upcoming milestone dates and designated owners for pending deliverables.',
     ],
     decisionsMade: [
       'Approved WebRTC mesh topology with adaptive bitrate fallback.',
-      'Adopted Gemini 3.7 Flash for low-latency meeting transcript synthesis and action item extraction.',
+      'Standardized meeting intelligence summaries with structured action items and owner attribution.',
       'Standardized meeting recording media format as high-quality WebM container.',
     ],
     actionItems: [

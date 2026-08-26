@@ -233,7 +233,7 @@ export const TranscriptDrawer: React.FC<TranscriptDrawerProps> = ({
             });
 
             return (
-              <div key={item.id || index} className="group flex flex-col gap-1 text-xs">
+              <div key={`${item.id || 'tr'}-${index}`} className="group flex flex-col gap-1 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-indigo-400">{item.speakerName}</span>
                   <span className="text-[10px] text-slate-500">{time}</span>

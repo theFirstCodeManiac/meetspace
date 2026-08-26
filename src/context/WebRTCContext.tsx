@@ -532,7 +532,7 @@ export const WebRTCProvider: React.FC<{
 
           case 'TRANSCRIPT_ENTRY_RECEIVED': {
             const entry: TranscriptItem = {
-              id: payload.id || `tr_${Date.now()}`,
+              id: payload.id || `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               speakerId: payload.speakerId,
               speakerName: payload.speakerName,
               text: payload.text,
@@ -540,7 +540,10 @@ export const WebRTCProvider: React.FC<{
               isFinal: payload.isFinal ?? true,
             };
 
-            setTranscript(prev => [...prev, entry]);
+            setTranscript(prev => {
+              if (prev.some(t => t.id === entry.id)) return prev;
+              return [...prev, entry];
+            });
             setLatestCaption({
               speakerName: entry.speakerName,
               text: entry.text,
@@ -990,7 +993,7 @@ export const WebRTCProvider: React.FC<{
           dialogueIndex++;
 
           const simulatedEntry: TranscriptItem = {
-            id: `tr_sim_${Date.now()}`,
+            id: `tr_sim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
             speakerId: nextSpeaker,
             speakerName: item.speaker,
             text: item.text,
@@ -998,7 +1001,10 @@ export const WebRTCProvider: React.FC<{
             isFinal: true,
           };
 
-          setTranscript(prev => [...prev, simulatedEntry]);
+          setTranscript(prev => {
+            if (prev.some(t => t.id === simulatedEntry.id)) return prev;
+            return [...prev, simulatedEntry];
+          });
           setLatestCaption({
             speakerName: simulatedEntry.speakerName,
             text: simulatedEntry.text,
