@@ -4,14 +4,23 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'meetspace_super_secret_jwt_key_2026';
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Support serverless write directories (/tmp) when deployed on Vercel or read-only containers
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NODE_ENV === 'production' && !process.env.DOCKER);
+const DATA_DIR = isServerless 
+  ? path.join('/tmp', 'meetspace_data') 
+  : path.join(process.cwd(), 'data');
+
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const MEETINGS_FILE = path.join(DATA_DIR, 'meetings.json');
 const MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+// Ensure data directory exists safely
+try {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+} catch (dirErr) {
+  console.warn('Storage directory initialization notice:', dirErr);
 }
 
 export interface UserRecord {
