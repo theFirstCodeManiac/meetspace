@@ -42,11 +42,6 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  const handleFillDemo = () => {
-    setEmail('alex.morgan@meetspace.io');
-    setPassword('Password123!');
-  };
-
   return (
     <div className="flex-1 flex items-center justify-center p-4 sm:p-6 lg:p-8">
       <div className="w-full max-w-md space-y-6">
@@ -60,7 +55,7 @@ export const LoginPage: React.FC = () => {
             Sign in to MeetSpace
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Enter your credentials to manage your meetings and schedule.
+            Enter your email and password to access your meetings.
           </p>
         </div>
 
@@ -78,7 +73,7 @@ export const LoginPage: React.FC = () => {
               id="login-email"
               type="email"
               label="Email Address"
-              placeholder="alex.morgan@meetspace.io"
+              placeholder="you@company.com"
               value={email}
               onChange={e => setEmail(e.target.value)}
               leftIcon={<Mail className="w-4 h-4" />}
@@ -126,21 +121,6 @@ export const LoginPage: React.FC = () => {
             >
               Sign In
             </Button>
-
-            {/* Quick Demo Credentials */}
-            <div className="pt-2">
-              <Button
-                id="login-fill-demo-btn"
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="w-full text-xs"
-                leftIcon={<Sparkles className="w-3.5 h-3.5 text-indigo-500" />}
-                onClick={handleFillDemo}
-              >
-                Auto-fill Demo Account (alex.morgan@meetspace.io)
-              </Button>
-            </div>
           </form>
         </Card>
 

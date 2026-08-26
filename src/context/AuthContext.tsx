@@ -22,15 +22,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshUser = useCallback(async () => {
     const token = getStoredToken();
     if (!token) {
-      // If no token exists, seed demo user session for instant exploration
-      try {
-        const res = await api.auth.login('alex.morgan@meetspace.io', 'Password123!');
-        setUser(res.user);
-      } catch {
-        setUser(null);
-      } finally {
-        setIsLoading(false);
-      }
+      setUser(null);
+      setIsLoading(false);
       return;
     }
 

@@ -294,7 +294,7 @@ export const Navbar: React.FC = () => {
             </button>
           </form>
 
-          {isAuthenticated && (
+          {isAuthenticated ? (
             <div className="space-y-1 pt-2">
               {navLinks.map(link => (
                 <button
@@ -323,6 +323,33 @@ export const Navbar: React.FC = () => {
                 <UserIcon className="w-4 h-4" />
                 Profile & Settings
               </button>
+            </div>
+          ) : (
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+              <Button
+                id="mobile-nav-register-btn"
+                variant="primary"
+                size="md"
+                className="w-full"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  navigate('register');
+                }}
+              >
+                Create Account
+              </Button>
+              <Button
+                id="mobile-nav-login-btn"
+                variant="outline"
+                size="md"
+                className="w-full"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  navigate('login');
+                }}
+              >
+                Sign In
+              </Button>
             </div>
           )}
         </div>

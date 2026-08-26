@@ -15,17 +15,7 @@ function getLocalUsers(): StoredClientUser[] {
     const raw = localStorage.getItem(LOCAL_USERS_KEY);
     if (raw) return JSON.parse(raw);
   } catch {}
-  // Default demo user
-  const defaultDemo: StoredClientUser = {
-    id: 'usr_demo_88219',
-    email: 'alex.morgan@meetspace.io',
-    passwordPlain: 'Password123!',
-    displayName: 'Alex Morgan',
-    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-    createdAt: new Date().toISOString(),
-  };
-  localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify([defaultDemo]));
-  return [defaultDemo];
+  return [];
 }
 
 function saveLocalUsers(users: StoredClientUser[]) {
@@ -39,21 +29,7 @@ function getLocalMeetings(): Meeting[] {
     const raw = localStorage.getItem(LOCAL_MEETINGS_KEY);
     if (raw) return JSON.parse(raw);
   } catch {}
-  const defaultMeeting: Meeting = {
-    id: 'sch_demo_1',
-    meetingCode: 'eng-sync-dev',
-    title: 'Weekly Engineering Sync & WebRTC Architecture',
-    hostId: 'usr_demo_88219',
-    hostName: 'Alex Morgan',
-    status: 'SCHEDULED',
-    scheduledAt: new Date(Date.now() + 7200000).toISOString(),
-    allowGuests: true,
-    waitingRoomEnabled: true,
-    participantCount: 8,
-    createdAt: new Date().toISOString(),
-  };
-  localStorage.setItem(LOCAL_MEETINGS_KEY, JSON.stringify([defaultMeeting]));
-  return [defaultMeeting];
+  return [];
 }
 
 function saveLocalMeetings(meetings: Meeting[]) {
@@ -225,11 +201,10 @@ export const api = {
           try {
             const raw = atob(token.replace('local_jwt_', ''));
             const user = JSON.parse(raw);
-            return { user };
+            if (user && user.id) return { user };
           } catch {}
         }
-        const users = getLocalUsers();
-        return { user: users[0] };
+        throw new Error('Not authenticated');
       }
     },
 
@@ -240,8 +215,16 @@ export const api = {
           body: JSON.stringify({ displayName, avatarUrl }),
         });
       } catch (err: any) {
+        const token = getStoredToken();
         const users = getLocalUsers();
-        const user = users[0];
+        let user = users[0];
+        if (token && token.startsWith('local_jwt_')) {
+          try {
+            const raw = atob(token.replace('local_jwt_', ''));
+            const parsed = JSON.parse(raw);
+            user = users.find(u => u.id === parsed.id) || parsed;
+          } catch {}
+        }
         if (user) {
           user.displayName = displayName;
           if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
@@ -295,12 +278,25 @@ export const api = {
       } catch (err: any) {
         const meetings = getLocalMeetings();
         const code = payload.meetingCode || `${Math.random().toString(36).substring(2, 5)}-${Math.random().toString(36).substring(2, 6)}-${Math.random().toString(36).substring(2, 5)}`;
+        
+        let hostName = 'Host';
+        let hostId = 'guest_host';
+        const token = getStoredToken();
+        if (token && token.startsWith('local_jwt_')) {
+          try {
+            const raw = atob(token.replace('local_jwt_', ''));
+            const user = JSON.parse(raw);
+            if (user?.displayName) hostName = user.displayName;
+            if (user?.id) hostId = user.id;
+          } catch {}
+        }
+
         const newMeeting: Meeting = {
           id: `mtg_${Math.random().toString(36).substring(2, 9)}`,
           meetingCode: code.toLowerCase().trim(),
-          title: payload.title || 'Ad-hoc Meeting',
-          hostId: 'usr_demo_88219',
-          hostName: 'Alex Morgan',
+          title: payload.title || 'Instant Meeting',
+          hostId,
+          hostName,
           status: payload.scheduledAt ? 'SCHEDULED' : 'ACTIVE',
           scheduledAt: payload.scheduledAt,
           allowGuests: payload.allowGuests ?? true,
@@ -334,8 +330,8 @@ export const api = {
           id: `mtg_${Math.random().toString(36).substring(2, 9)}`,
           meetingCode: code.toLowerCase().trim(),
           title: `Meeting (${code})`,
-          hostId: 'usr_demo_88219',
-          hostName: 'Alex Morgan',
+          hostId: 'guest_host',
+          hostName: 'Meeting Host',
           status: 'ACTIVE',
           allowGuests: true,
           waitingRoomEnabled: false,

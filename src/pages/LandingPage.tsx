@@ -263,6 +263,48 @@ export const LandingPage: React.FC = () => {
           </div>
         </div>
       </section>
+
+      {/* Prompt User to Register / Sign In Banner */}
+      {!isAuthenticated && (
+        <section className="py-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full">
+          <div className="rounded-3xl bg-gradient-to-br from-indigo-900 via-indigo-950 to-slate-950 p-8 sm:p-12 text-white shadow-xl relative overflow-hidden flex flex-col md:flex-row items-center justify-between gap-8 border border-indigo-800/50">
+            <div className="space-y-3 max-w-xl text-center md:text-left z-10">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 text-xs font-semibold">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Personalized Meeting Spaces</span>
+              </div>
+              <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">
+                Create your account or sign in
+              </h2>
+              <p className="text-sm text-indigo-200 leading-relaxed">
+                Sign up to save recurring rooms, view meeting history, manage recordings, and schedule sessions with custom waiting room security.
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto z-10">
+              <Button
+                id="cta-register-btn"
+                variant="primary"
+                size="lg"
+                onClick={() => navigate('register')}
+                className="w-full sm:w-auto font-semibold bg-white text-indigo-950 hover:bg-slate-100 shadow-lg"
+                rightIcon={<ArrowRight className="w-4 h-4" />}
+              >
+                Create Free Account
+              </Button>
+              <Button
+                id="cta-signin-btn"
+                variant="outline"
+                size="lg"
+                onClick={() => navigate('login')}
+                className="w-full sm:w-auto font-semibold border-indigo-400/40 text-white hover:bg-white/10"
+              >
+                Sign In
+              </Button>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 };

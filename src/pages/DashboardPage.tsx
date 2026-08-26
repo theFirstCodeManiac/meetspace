@@ -132,11 +132,46 @@ export const DashboardPage: React.FC = () => {
   return (
     <div className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 sm:py-10 space-y-8">
       
+      {/* Guest Mode Notice Banner */}
+      {!user && (
+        <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-indigo-950 dark:text-indigo-200 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              You are browsing in guest mode
+            </h2>
+            <p className="text-xs text-indigo-800/80 dark:text-indigo-300/80">
+              Sign in or create an account to save recurring meeting rooms, access call recordings, and sync across devices.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <Button
+              id="guest-login-btn"
+              variant="outline"
+              size="sm"
+              className="flex-1 sm:flex-none border-indigo-300 dark:border-indigo-700 text-indigo-950 dark:text-white"
+              onClick={() => navigate('login')}
+            >
+              Sign In
+            </Button>
+            <Button
+              id="guest-register-btn"
+              variant="primary"
+              size="sm"
+              className="flex-1 sm:flex-none"
+              onClick={() => navigate('register')}
+            >
+              Register
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Top Welcome Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Welcome, {user?.displayName || 'Host'}
+            Welcome, {user?.displayName || 'Guest'}
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Create an instant meeting, schedule future sessions, or join via code.

@@ -165,7 +165,7 @@ export const ScheduledMeetingsPage: React.FC = () => {
       ) : (
         <div className="space-y-3">
           {filteredMeetings.map(meeting => {
-            const isHost = meeting.hostId === user?.id || user?.email === 'alex.morgan@meetspace.io';
+            const isHost = meeting.hostId === user?.id;
             return (
               <Card
                 key={meeting.id}

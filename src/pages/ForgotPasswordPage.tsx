@@ -101,7 +101,7 @@ export const ForgotPasswordPage: React.FC = () => {
                 id="forgot-email"
                 type="email"
                 label="Registered Email"
-                placeholder="alex.morgan@meetspace.io"
+                placeholder="you@company.com"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 leftIcon={<Mail className="w-4 h-4" />}
