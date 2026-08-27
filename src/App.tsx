@@ -6,9 +6,11 @@
 import React from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './context/ToastContext';
+import { PWAProvider } from './context/PWAContext';
 import { AuthProvider } from './context/AuthContext';
 import { NavigationProvider, useNavigation } from './context/NavigationContext';
 import { AppLayout } from './components/layout/AppLayout';
+import { InstallAppModal } from './components/ui/InstallAppModal';
 
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage } from './pages/LoginPage';
@@ -69,14 +71,18 @@ export default function App() {
   return (
     <ThemeProvider>
       <ToastProvider>
-        <AuthProvider>
-          <NavigationProvider>
-            <AppLayout>
-              <AppRoutes />
-            </AppLayout>
-          </NavigationProvider>
-        </AuthProvider>
+        <PWAProvider>
+          <AuthProvider>
+            <NavigationProvider>
+              <AppLayout>
+                <AppRoutes />
+                <InstallAppModal />
+              </AppLayout>
+            </NavigationProvider>
+          </AuthProvider>
+        </PWAProvider>
       </ToastProvider>
     </ThemeProvider>
   );
 }
+

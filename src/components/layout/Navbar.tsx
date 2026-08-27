@@ -3,6 +3,7 @@ import { useNavigation } from '../../context/NavigationContext';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useToast } from '../../context/ToastContext';
+import { usePWA } from '../../context/PWAContext';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
 import { 
@@ -17,7 +18,8 @@ import {
   X, 
   Keyboard, 
   Plus, 
-  LayoutDashboard
+  LayoutDashboard,
+  Download
 } from 'lucide-react';
 import { formatMeetingCode } from '../../lib/utils';
 
@@ -26,6 +28,7 @@ export const Navbar: React.FC = () => {
   const { user, isAuthenticated, logout } = useAuth();
   const { resolvedTheme, toggleTheme } = useTheme();
   const { info, error } = useToast();
+  const { isInstalled, openInstallModal } = usePWA();
 
   const [quickCode, setQuickCode] = useState('');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -138,7 +141,20 @@ export const Navbar: React.FC = () => {
         </div>
 
         {/* Right Action Icons & Auth Profile */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2 sm:gap-2.5">
+          {/* Install PWA App Button */}
+          {!isInstalled && (
+            <button
+              id="navbar-install-app-btn"
+              onClick={openInstallModal}
+              className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/70 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800/60 text-xs font-semibold shadow-sm transition-all cursor-pointer"
+              title="Install MeetSpace Desktop/Mobile App"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Install App</span>
+            </button>
+          )}
+
           {/* Dark / Light Toggle */}
           <button
             id="theme-toggle-btn"
@@ -215,6 +231,17 @@ export const Navbar: React.FC = () => {
                       >
                         <Calendar className="w-4 h-4 text-slate-400" />
                         My Schedule
+                      </button>
+                      <button
+                        id="dropdown-install-app-link"
+                        onClick={() => {
+                          setIsProfileOpen(false);
+                          openInstallModal();
+                        }}
+                        className="w-full flex items-center gap-2.5 px-4 py-2 text-xs sm:text-sm text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 text-left transition-colors cursor-pointer font-medium"
+                      >
+                        <Download className="w-4 h-4 text-indigo-500" />
+                        Install App / Shortcut
                       </button>
                     </div>
 
@@ -323,9 +350,35 @@ export const Navbar: React.FC = () => {
                 <UserIcon className="w-4 h-4" />
                 Profile & Settings
               </button>
+              {!isInstalled && (
+                <button
+                  id="mobile-drawer-install-btn"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    openInstallModal();
+                  }}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50/80 dark:bg-indigo-950/60 border border-indigo-200/60 dark:border-indigo-800/40 mt-1 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  Install / Download App
+                </button>
+              )}
             </div>
           ) : (
             <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+              {!isInstalled && (
+                <button
+                  id="mobile-drawer-install-guest-btn"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    openInstallModal();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/80 dark:border-indigo-800/60 mb-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  Download & Install App
+                </button>
+              )}
               <Button
                 id="mobile-nav-register-btn"
                 variant="primary"

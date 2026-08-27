@@ -1,6 +1,8 @@
 import React from 'react';
 import { Navbar } from './Navbar';
 import { useNavigation } from '../../context/NavigationContext';
+import { usePWA } from '../../context/PWAContext';
+import { Download } from 'lucide-react';
 
 export interface AppLayoutProps {
   children: React.ReactNode;
@@ -8,6 +10,7 @@ export interface AppLayoutProps {
 
 export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const { currentRoute } = useNavigation();
+  const { openInstallModal, isInstalled } = usePWA();
 
   // In active meeting room or ended page, navbar and footer are omitted for full-screen immersive video stage
   const isFullRoom = currentRoute === 'meeting-room' || currentRoute === 'meeting-ended';
@@ -32,9 +35,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
               <span>Encrypted WebRTC Media & WebSocket Signaling</span>
             </div>
             <div className="flex items-center gap-4">
+              {!isInstalled && (
+                <button
+                  id="footer-download-app-btn"
+                  onClick={openInstallModal}
+                  className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download App (PWA)</span>
+                </button>
+              )}
               <span className="flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                STUN/TURN Systems Operational
+                STUN/TURN Operational
               </span>
               <span>•</span>
               <span>v1.0.0</span>
@@ -45,3 +58,4 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
     </div>
   );
 };
+

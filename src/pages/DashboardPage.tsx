@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '../context/NavigationContext';
 import { useToast } from '../context/ToastContext';
+import { usePWA } from '../context/PWAContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Modal } from '../components/ui/Modal';
@@ -18,7 +19,9 @@ import {
   ArrowRight, 
   ShieldCheck, 
   Sparkles,
-  RefreshCw
+  RefreshCw,
+  Download,
+  Laptop
 } from 'lucide-react';
 import { formatMeetingCode, generateMeetingCode, formatDate } from '../lib/utils';
 import { api } from '../lib/api';
@@ -28,6 +31,7 @@ export const DashboardPage: React.FC = () => {
   const { user } = useAuth();
   const { navigate } = useNavigation();
   const { success, error } = useToast();
+  const { isInstalled, openInstallModal } = usePWA();
 
   const [joinCode, setJoinCode] = useState('');
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
@@ -302,6 +306,40 @@ export const DashboardPage: React.FC = () => {
         </Card>
 
       </div>
+
+      {/* PWA App Install Banner */}
+      {!isInstalled && (
+        <div 
+          id="dashboard-pwa-banner"
+          className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-indigo-900/40 via-purple-900/30 to-slate-900/50 border border-indigo-500/30 backdrop-blur-xs flex flex-col sm:flex-row items-center justify-between gap-4"
+        >
+          <div className="flex items-center gap-3.5 text-left w-full sm:w-auto">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center shrink-0">
+              <Laptop className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                Download MeetSpace Desktop & Mobile App
+                <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 text-[10px] font-bold">PWA</span>
+              </h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Install as a standalone app or download a 1-click desktop shortcut for fast meeting access.
+              </p>
+            </div>
+          </div>
+
+          <Button
+            id="dashboard-install-pwa-btn"
+            variant="primary"
+            size="sm"
+            onClick={openInstallModal}
+            className="w-full sm:w-auto shrink-0 font-semibold shadow-sm"
+            leftIcon={<Download className="w-4 h-4" />}
+          >
+            Install App / Shortcut
+          </Button>
+        </div>
+      )}
 
       {/* Upcoming Scheduled Meetings Section */}
       <div className="space-y-4">
