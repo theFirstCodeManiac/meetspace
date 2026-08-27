@@ -23,7 +23,7 @@ export const SpotlightView: React.FC<SpotlightViewProps> = ({
     <div className="w-full h-full p-2 sm:p-4 flex flex-col lg:flex-row gap-3 sm:gap-4 overflow-hidden">
       
       {/* Primary Main Spotlight Stage */}
-      <div className="flex-1 w-full h-full min-h-[300px] flex items-center justify-center">
+      <div className="flex-1 w-full h-full min-h-0 min-w-0 flex items-center justify-center">
         <VideoCard
           participant={spotlightParticipant}
           isSpotlight

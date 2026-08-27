@@ -18,7 +18,11 @@ const STUN_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
   ],
+  iceCandidatePoolSize: 10,
 };
 
 interface WebRTCContextType {
@@ -80,7 +84,6 @@ interface WebRTCContextType {
   isSimulationActive: boolean;
   toggleSimulationAttendees: () => void;
 
-  // --- Phase 4: AI & Collaboration Enhancements ---
   // Live Transcription & Captions
   transcript: TranscriptItem[];
   isCaptionsOn: boolean;
@@ -167,8 +170,7 @@ export const WebRTCProvider: React.FC<{
   const [isSimulationActive, setIsSimulationActive] = useState(false);
   const simulationIntervalRef = useRef<number | null>(null);
 
-  // --- Phase 4 State Hooks ---
-  // Transcription & Live Captions
+  // Live Transcription & Captions
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
   const [isCaptionsOn, setIsCaptionsOn] = useState(false);
   const [captionsLanguage, setCaptionsLanguage] = useState('English');
@@ -201,19 +203,65 @@ export const WebRTCProvider: React.FC<{
   const speechRecognitionRef = useRef<any>(null);
   const recognitionActiveRef = useRef<boolean>(false);
 
-  // Refs
+  // Refs & Tracking
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const iceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const processedMessageIdsRef = useRef<Set<string>>(new Set());
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioAnimFrameRef = useRef<number | null>(null);
-  const localParticipantIdRef = useRef<string>(`usr_${Math.random().toString(36).substring(2, 9)}`);
+
+  // Unique session peer ID for every device/tab
+  const localParticipantIdRef = useRef<string>(() => {
+    const sessionKey = `meetspace_peer_${meetingCode}`;
+    let stored = sessionStorage.getItem(sessionKey);
+    if (!stored) {
+      stored = user?.id ? `${user.id}_${Math.random().toString(36).substring(2, 7)}` : `usr_${Math.random().toString(36).substring(2, 9)}`;
+      sessionStorage.setItem(sessionKey, stored);
+    }
+    return stored;
+  });
 
   const effectiveDisplayName = user?.displayName || guestName || 'Guest Attendee';
 
-  // 1. Enumerate Media Devices
+  // Unified send function (WebSocket + HTTP Fallback)
+  const sendSignalingMessage = useCallback((type: string, payload: any = {}, targetPeerId?: string) => {
+    const rawCode = (meetingCode || 'room').toLowerCase().trim();
+    const message = {
+      type,
+      meetingCode: rawCode,
+      senderPeerId: localParticipantIdRef.current,
+      targetPeerId,
+      payload,
+    };
+
+    // 1. Try WebSocket
+    let wsSent = false;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify(message));
+        wsSent = true;
+      } catch (err) {
+        console.warn('WS send failed, falling back to HTTP:', err);
+      }
+    }
+
+    // 2. Always backup via HTTP send endpoint if WS is not open or for critical room actions
+    if (!wsSent || type.startsWith('SIGNAL_') || type === 'JOIN_ROOM' || type === 'LEAVE_ROOM' || type === 'CHAT_MESSAGE') {
+      fetch('/api/signaling/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message),
+      }).catch(err => {
+        console.warn('Signaling HTTP send error:', err);
+      });
+    }
+  }, [meetingCode]);
+
+  // Enumerate Media Devices
   const updateDeviceList = useCallback(async () => {
     try {
       if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -228,7 +276,61 @@ export const WebRTCProvider: React.FC<{
     }
   }, []);
 
-  // 2. Initialize Local Audio & Video Stream
+  // Audio Analyzer
+  const setupAudioAnalyzer = (stream: MediaStream) => {
+    try {
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!audioTrack) return;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      const audioCtx = new AudioCtx();
+      audioContextRef.current = audioCtx;
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      let lastSpeakingEmit = 0;
+
+      const analyze = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        setLocalAudioLevel(Math.min(100, Math.round(average * 1.8)));
+
+        // Broadcast speaking update
+        const now = Date.now();
+        if (now - lastSpeakingEmit > 400) {
+          lastSpeakingEmit = now;
+          const isSpeakingNow = average > 14 && isAudioOn;
+          sendSignalingMessage('PEER_SPEAKING_UPDATE', {
+            isSpeaking: isSpeakingNow,
+            audioLevel: average,
+          });
+        }
+
+        audioAnimFrameRef.current = requestAnimationFrame(analyze);
+      };
+
+      analyze();
+    } catch {
+      // Analyzer optional
+    }
+  };
+
+  // Initialize Local Media Stream
   useEffect(() => {
     let active = true;
 
@@ -236,7 +338,7 @@ export const WebRTCProvider: React.FC<{
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: selectedAudioInput ? { deviceId: { exact: selectedAudioInput } } : true,
-          video: selectedVideoInput 
+          video: selectedVideoInput
             ? { deviceId: { exact: selectedVideoInput }, width: { ideal: 1280 }, height: { ideal: 720 } }
             : { width: { ideal: 1280 }, height: { ideal: 720 } },
         });
@@ -246,30 +348,33 @@ export const WebRTCProvider: React.FC<{
           return;
         }
 
-        // Apply initial mute states
         stream.getAudioTracks().forEach(t => (t.enabled = initialAudio));
         stream.getVideoTracks().forEach(t => (t.enabled = initialVideo));
 
         localStreamRef.current = stream;
         setLocalStream(stream);
 
-        // Setup audio level analyzer
+        // Update tracks in existing peer connections
+        peerConnections.current.forEach(pc => {
+          const senders = pc.getSenders();
+          stream.getTracks().forEach(track => {
+            const sender = senders.find(s => s.track?.kind === track.kind);
+            if (sender) {
+              sender.replaceTrack(track).catch(console.warn);
+            } else {
+              try {
+                pc.addTrack(track, stream);
+              } catch (e) {
+                console.warn(e);
+              }
+            }
+          });
+        });
+
         setupAudioAnalyzer(stream);
         updateDeviceList();
       } catch (err: any) {
         console.warn('Local media access note:', err?.message);
-        // Fallback with empty or audio-only if video failed
-        try {
-          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          if (active) {
-            localStreamRef.current = audioOnlyStream;
-            setLocalStream(audioOnlyStream);
-            setIsVideoOn(false);
-            setupAudioAnalyzer(audioOnlyStream);
-          }
-        } catch {
-          // No media devices available
-        }
       }
     };
 
@@ -287,411 +392,138 @@ export const WebRTCProvider: React.FC<{
         cancelAnimationFrame(audioAnimFrameRef.current);
       }
     };
-  }, [selectedAudioInput, selectedVideoInput, updateDeviceList]);
+  }, [selectedAudioInput, selectedVideoInput, initialAudio, initialVideo, updateDeviceList]);
 
-  // Audio level visualizer loop
-  const setupAudioAnalyzer = (stream: MediaStream) => {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      audioContextRef.current = ctx;
-
-      const audioTrack = stream.getAudioTracks()[0];
-      if (!audioTrack) return;
-
-      const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      let lastSpeakingEmit = 0;
-
-      const analyze = () => {
-        if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
-
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / dataArray.length;
-        const normalized = Math.min(100, Math.round((avg / 128) * 100));
-        setLocalAudioLevel(normalized);
-
-        const isSpeaking = normalized > 15 && isAudioOn;
-        const now = Date.now();
-
-        // Throttle broadcast of speaking indicator to once every 300ms
-        if (now - lastSpeakingEmit > 300 && wsRef.current?.readyState === WebSocket.OPEN) {
-          lastSpeakingEmit = now;
-          wsRef.current.send(JSON.stringify({
-            type: 'AUDIO_SPEAKING_UPDATE',
-            meetingCode,
-            payload: {
-              isSpeaking,
-              audioLevel: normalized,
-            },
-          }));
-        }
-
-        audioAnimFrameRef.current = requestAnimationFrame(analyze);
-      };
-
-      analyze();
-    } catch {
-      // Audio context analyzer optional
+  // WebRTC Peer Connection Helper
+  const createPeerConnection = useCallback((remotePeerId: string, isInitiator: boolean) => {
+    if (peerConnections.current.has(remotePeerId)) {
+      return peerConnections.current.get(remotePeerId)!;
     }
-  };
-
-  // 3. Connect to WebSocket Signaling Server
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/signaling`;
-
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setIsConnected(true);
-      // Join Room
-      ws.send(JSON.stringify({
-        type: 'JOIN_ROOM',
-        meetingCode,
-        payload: {
-          participantId: localParticipantIdRef.current,
-          displayName: effectiveDisplayName,
-          avatarUrl: user?.avatarUrl,
-          audioEnabled: isAudioOn,
-          videoEnabled: isVideoOn,
-        },
-      }));
-    };
-
-    ws.onmessage = async (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        const { type, payload } = message;
-
-        switch (type) {
-          case 'ROOM_JOINED': {
-            setIsHost(payload.isHost);
-            const initialPeers = new Map<string, Participant>();
-            payload.participants.forEach((p: any) => {
-              initialPeers.set(p.id, {
-                id: p.id,
-                displayName: p.displayName,
-                avatarUrl: p.avatarUrl,
-                isHost: p.isHost,
-                isLocal: false,
-                audioEnabled: p.audioEnabled,
-                videoEnabled: p.videoEnabled,
-                screenSharing: p.screenSharing,
-                handRaised: p.handRaised,
-                isSpeaking: false,
-                inWaitingRoom: p.inWaitingRoom,
-              });
-              // Initiate WebRTC peer connection to existing participants
-              createPeerConnection(p.id, true);
-            });
-            setRemoteParticipants(initialPeers);
-            break;
-          }
-
-          case 'PEER_JOINED': {
-            const newP = payload.participant;
-            setRemoteParticipants((prev: Map<string, Participant>) => {
-              const updated = new Map<string, Participant>(prev);
-              updated.set(newP.id, {
-                id: newP.id,
-                displayName: newP.displayName,
-                avatarUrl: newP.avatarUrl,
-                isHost: newP.isHost,
-                isLocal: false,
-                audioEnabled: newP.audioEnabled,
-                videoEnabled: newP.videoEnabled,
-                screenSharing: newP.screenSharing,
-                handRaised: newP.handRaised,
-                isSpeaking: false,
-                inWaitingRoom: newP.inWaitingRoom,
-              });
-              return updated;
-            });
-            createPeerConnection(newP.id, false);
-            info('Participant Joined', `${newP.displayName} entered the meeting.`);
-            break;
-          }
-
-          case 'PEER_LEFT': {
-            const peerId = payload.participantId;
-            setRemoteParticipants((prev: Map<string, Participant>) => {
-              const updated = new Map<string, Participant>(prev);
-              const exiting = updated.get(peerId);
-              if (exiting) {
-                info('Participant Left', `${exiting.displayName} left the call.`);
-                updated.delete(peerId);
-              }
-              return updated;
-            });
-            closePeerConnection(peerId);
-            break;
-          }
-
-          case 'SIGNAL_OFFER': {
-            await handleOffer(payload.senderPeerId, payload.offer);
-            break;
-          }
-
-          case 'SIGNAL_ANSWER': {
-            await handleAnswer(payload.senderPeerId, payload.answer);
-            break;
-          }
-
-          case 'SIGNAL_ICE_CANDIDATE': {
-            await handleIceCandidate(payload.senderPeerId, payload.candidate);
-            break;
-          }
-
-          case 'PEER_MEDIA_STATE_CHANGED': {
-            const { participantId, audioEnabled, videoEnabled, screenSharing, handRaised } = payload;
-            setRemoteParticipants((prev: Map<string, Participant>) => {
-              const updated = new Map<string, Participant>(prev);
-              const peer = updated.get(participantId);
-              if (peer) {
-                const updatedPeer: Participant = {
-                  ...peer,
-                  audioEnabled: audioEnabled !== undefined ? audioEnabled : peer.audioEnabled,
-                  videoEnabled: videoEnabled !== undefined ? videoEnabled : peer.videoEnabled,
-                  screenSharing: screenSharing !== undefined ? screenSharing : peer.screenSharing,
-                  handRaised: handRaised !== undefined ? handRaised : peer.handRaised,
-                };
-                updated.set(participantId, updatedPeer);
-              }
-              return updated;
-            });
-            break;
-          }
-
-          case 'PEER_SPEAKING_UPDATE': {
-            const { participantId, isSpeaking, audioLevel } = payload;
-            setRemoteParticipants((prev: Map<string, Participant>) => {
-              const updated = new Map<string, Participant>(prev);
-              const peer = updated.get(participantId);
-              if (peer) {
-                const updatedPeer: Participant = {
-                  ...peer,
-                  isSpeaking,
-                  audioLevel,
-                };
-                updated.set(participantId, updatedPeer);
-              }
-              return updated;
-            });
-            if (isSpeaking) {
-              setActiveSpeakerId(participantId);
-            }
-            break;
-          }
-
-          case 'CHAT_MESSAGE_RECEIVED': {
-            const newMsg = payload.message;
-            setChatMessages(prev => [...prev, newMsg]);
-            setUnreadChatCount(prev => prev + 1);
-            break;
-          }
-
-          case 'REACTION_RECEIVED': {
-            const { displayName, emoji } = payload;
-            const newReaction: FloatingReaction = {
-              id: `react_${Date.now()}_${Math.random()}`,
-              senderName: displayName,
-              emoji,
-              xOffset: 20 + Math.random() * 60,
-            };
-            setFloatingReactions(prev => [...prev, newReaction]);
-            setTimeout(() => {
-              setFloatingReactions(prev => prev.filter(r => r.id !== newReaction.id));
-            }, 3000);
-            break;
-          }
-
-          case 'WHITEBOARD_STROKE_RECEIVED': {
-            const { stroke } = payload;
-            if (stroke) {
-              setWhiteboardStrokes(prev => [...prev, stroke]);
-            }
-            break;
-          }
-
-          case 'WHITEBOARD_CLEAR_RECEIVED': {
-            setWhiteboardStrokes([]);
-            break;
-          }
-
-          case 'TRANSCRIPT_ENTRY_RECEIVED': {
-            const entry: TranscriptItem = {
-              id: payload.id || `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              speakerId: payload.speakerId,
-              speakerName: payload.speakerName,
-              text: payload.text,
-              timestamp: payload.timestamp || new Date().toISOString(),
-              isFinal: payload.isFinal ?? true,
-            };
-
-            setTranscript(prev => {
-              if (prev.some(t => t.id === entry.id)) return prev;
-              return [...prev, entry];
-            });
-            setLatestCaption({
-              speakerName: entry.speakerName,
-              text: entry.text,
-            });
-            break;
-          }
-
-          case 'FORCE_MUTE_AUDIO': {
-            setIsAudioOn(false);
-            if (localStreamRef.current) {
-              localStreamRef.current.getAudioTracks().forEach(t => (t.enabled = false));
-            }
-            warning('Muted by Host', 'The meeting host has muted all participants.');
-            break;
-          }
-
-          case 'KICKED_FROM_ROOM': {
-            error('Removed from Room', 'You were removed from this meeting by the host.');
-            navigate('meeting-ended');
-            break;
-          }
-
-          case 'MEETING_ENDED_BY_HOST': {
-            info('Meeting Ended', 'The host has ended the meeting for everyone.');
-            navigate('meeting-ended');
-            break;
-          }
-
-          default:
-            break;
-        }
-      } catch (err) {
-        console.error('WebSocket parse error:', err);
-      }
-    };
-
-    ws.onclose = () => {
-      setIsConnected(false);
-    };
-
-    return () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'LEAVE_ROOM',
-          meetingCode,
-        }));
-      }
-      ws.close();
-      peerConnections.current.forEach(pc => pc.close());
-      peerConnections.current.clear();
-    };
-  }, [meetingCode, effectiveDisplayName, user?.avatarUrl, isAudioOn, isVideoOn, info, error, warning, navigate]);
-
-  // WebRTC Mesh Helpers
-  const createPeerConnection = (remotePeerId: string, isInitiator: boolean) => {
-    if (peerConnections.current.has(remotePeerId)) return;
 
     try {
       const pc = new RTCPeerConnection(STUN_SERVERS);
       peerConnections.current.set(remotePeerId, pc);
 
-      // Add local tracks to peer connection
+      if (!iceQueuesRef.current.has(remotePeerId)) {
+        iceQueuesRef.current.set(remotePeerId, []);
+      }
+
+      // Add local stream tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => {
-          pc.addTrack(track, localStreamRef.current!);
+          try {
+            pc.addTrack(track, localStreamRef.current!);
+          } catch (e) {
+            console.warn(e);
+          }
         });
       }
 
       // Handle ICE Candidates
       pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'SIGNAL_ICE_CANDIDATE',
-            meetingCode,
-            payload: {
-              targetPeerId: remotePeerId,
-              candidate: event.candidate,
-            },
-          }));
+        if (event.candidate) {
+          sendSignalingMessage('SIGNAL_ICE_CANDIDATE', {
+            targetPeerId: remotePeerId,
+            candidate: event.candidate,
+          }, remotePeerId);
         }
       };
 
       // Handle Remote Tracks
       pc.ontrack = (event) => {
-        const remoteStream = event.streams[0];
+        const remoteStream = event.streams[0] || new MediaStream([event.track]);
         setRemoteParticipants((prev: Map<string, Participant>) => {
           const updated = new Map<string, Participant>(prev);
           const peer = updated.get(remotePeerId);
           if (peer) {
-            const updatedPeer: Participant = {
+            updated.set(remotePeerId, {
               ...peer,
               stream: remoteStream,
-            };
-            updated.set(remotePeerId, updatedPeer);
+            });
           }
           return updated;
         });
       };
 
-      // If initiator, create and send Offer
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          console.warn(`Peer connection with ${remotePeerId} is ${pc.connectionState}`);
+        }
+      };
+
+      // If initiator, create and send Offer immediately
       if (isInitiator) {
-        pc.onnegotiationneeded = async () => {
+        const initiateOffer = async () => {
           try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({
-                type: 'SIGNAL_OFFER',
-                meetingCode,
-                payload: {
-                  targetPeerId: remotePeerId,
-                  offer,
-                },
-              }));
+            const offer = await pc.createOffer({
+              offerToReceiveAudio: true,
+              offerToReceiveVideo: true,
+            });
+            if (pc.signalingState !== 'closed') {
+              await pc.setLocalDescription(offer);
+              sendSignalingMessage('SIGNAL_OFFER', {
+                targetPeerId: remotePeerId,
+                offer,
+              }, remotePeerId);
             }
           } catch (e) {
             console.error('Create offer error:', e);
           }
         };
+
+        // Delay slightly for candidate gathering
+        setTimeout(initiateOffer, 50);
+
+        pc.onnegotiationneeded = async () => {
+          try {
+            if (pc.signalingState === 'stable') {
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignalingMessage('SIGNAL_OFFER', {
+                targetPeerId: remotePeerId,
+                offer,
+              }, remotePeerId);
+            }
+          } catch (e) {
+            console.warn('Renegotiation note:', e);
+          }
+        };
       }
+
+      return pc;
     } catch (err) {
       console.error('Peer connection init error:', err);
+      return null;
     }
-  };
+  }, [sendSignalingMessage]);
 
   const handleOffer = async (senderPeerId: string, offer: RTCSessionDescriptionInit) => {
     try {
       let pc = peerConnections.current.get(senderPeerId);
       if (!pc) {
-        createPeerConnection(senderPeerId, false);
-        pc = peerConnections.current.get(senderPeerId);
+        pc = createPeerConnection(senderPeerId, false) || undefined;
       }
       if (!pc) return;
 
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+      // Drain queued ICE candidates
+      const queue = iceQueuesRef.current.get(senderPeerId) || [];
+      while (queue.length > 0) {
+        const cand = queue.shift();
+        if (cand) {
+          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+        }
+      }
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'SIGNAL_ANSWER',
-          meetingCode,
-          payload: {
-            targetPeerId: senderPeerId,
-            answer,
-          },
-        }));
-      }
+      sendSignalingMessage('SIGNAL_ANSWER', {
+        targetPeerId: senderPeerId,
+        answer,
+      }, senderPeerId);
     } catch (err) {
       console.error('Handle offer error:', err);
     }
@@ -700,8 +532,17 @@ export const WebRTCProvider: React.FC<{
   const handleAnswer = async (senderPeerId: string, answer: RTCSessionDescriptionInit) => {
     try {
       const pc = peerConnections.current.get(senderPeerId);
-      if (pc) {
+      if (pc && pc.signalingState !== 'closed') {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+        // Drain queued ICE candidates
+        const queue = iceQueuesRef.current.get(senderPeerId) || [];
+        while (queue.length > 0) {
+          const cand = queue.shift();
+          if (cand) {
+            await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+          }
+        }
       }
     } catch (err) {
       console.error('Handle answer error:', err);
@@ -711,11 +552,16 @@ export const WebRTCProvider: React.FC<{
   const handleIceCandidate = async (senderPeerId: string, candidate: RTCIceCandidateInit) => {
     try {
       const pc = peerConnections.current.get(senderPeerId);
-      if (pc) {
+      if (pc && pc.remoteDescription && pc.remoteDescription.type) {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        if (!iceQueuesRef.current.has(senderPeerId)) {
+          iceQueuesRef.current.set(senderPeerId, []);
+        }
+        iceQueuesRef.current.get(senderPeerId)!.push(candidate);
       }
     } catch (err) {
-      console.error('Handle ICE candidate error:', err);
+      console.warn('Handle ICE candidate note:', err);
     }
   };
 
@@ -725,9 +571,394 @@ export const WebRTCProvider: React.FC<{
       pc.close();
       peerConnections.current.delete(peerId);
     }
+    iceQueuesRef.current.delete(peerId);
   };
 
-  // 4. Media Control Handlers
+  // Process any signaling message (from WS or HTTP poll)
+  const handleSignalingMessage = useCallback(async (message: any) => {
+    if (!message || !message.type) return;
+
+    if (message.id) {
+      if (processedMessageIdsRef.current.has(message.id)) return;
+      processedMessageIdsRef.current.add(message.id);
+      if (processedMessageIdsRef.current.size > 500) {
+        const first = processedMessageIdsRef.current.values().next().value;
+        if (first) processedMessageIdsRef.current.delete(first);
+      }
+    }
+
+    const { type, payload, senderPeerId } = message;
+
+    // Ignore self messages
+    if (senderPeerId === localParticipantIdRef.current) return;
+
+    switch (type) {
+      case 'ROOM_JOINED': {
+        setIsHost(payload.isHost);
+        const initialPeers = new Map<string, Participant>();
+        (payload.participants || []).forEach((p: any) => {
+          if (p.id === localParticipantIdRef.current) return;
+          initialPeers.set(p.id, {
+            id: p.id,
+            displayName: p.displayName,
+            avatarUrl: p.avatarUrl,
+            isHost: p.isHost,
+            isLocal: false,
+            audioEnabled: p.audioEnabled ?? true,
+            videoEnabled: p.videoEnabled ?? true,
+            screenSharing: p.screenSharing ?? false,
+            handRaised: p.handRaised ?? false,
+            isSpeaking: false,
+            inWaitingRoom: p.inWaitingRoom ?? false,
+          });
+          createPeerConnection(p.id, true);
+        });
+        setRemoteParticipants(initialPeers);
+        setIsConnected(true);
+        break;
+      }
+
+      case 'PEER_JOINED': {
+        const newP = payload.participant;
+        if (!newP || newP.id === localParticipantIdRef.current) return;
+
+        setRemoteParticipants((prev: Map<string, Participant>) => {
+          const updated = new Map<string, Participant>(prev);
+          updated.set(newP.id, {
+            id: newP.id,
+            displayName: newP.displayName || 'Attendee',
+            avatarUrl: newP.avatarUrl,
+            isHost: newP.isHost ?? false,
+            isLocal: false,
+            audioEnabled: newP.audioEnabled ?? true,
+            videoEnabled: newP.videoEnabled ?? true,
+            screenSharing: newP.screenSharing ?? false,
+            handRaised: newP.handRaised ?? false,
+            isSpeaking: false,
+            inWaitingRoom: newP.inWaitingRoom ?? false,
+          });
+          return updated;
+        });
+
+        // The joined peer or host establishes connection
+        createPeerConnection(newP.id, false);
+        info('Participant Joined', `${newP.displayName || 'A participant'} entered the room.`);
+        break;
+      }
+
+      case 'PEER_LEFT': {
+        const peerId = payload?.participantId || senderPeerId;
+        if (!peerId) return;
+        setRemoteParticipants((prev: Map<string, Participant>) => {
+          const updated = new Map<string, Participant>(prev);
+          const exiting = updated.get(peerId);
+          if (exiting) {
+            info('Participant Left', `${exiting.displayName} left the call.`);
+            updated.delete(peerId);
+          }
+          return updated;
+        });
+        closePeerConnection(peerId);
+        break;
+      }
+
+      case 'SIGNAL_OFFER': {
+        const sId = payload.senderPeerId || senderPeerId;
+        if (sId && payload.offer) {
+          await handleOffer(sId, payload.offer);
+        }
+        break;
+      }
+
+      case 'SIGNAL_ANSWER': {
+        const sId = payload.senderPeerId || senderPeerId;
+        if (sId && payload.answer) {
+          await handleAnswer(sId, payload.answer);
+        }
+        break;
+      }
+
+      case 'SIGNAL_ICE_CANDIDATE': {
+        const sId = payload.senderPeerId || senderPeerId;
+        if (sId && payload.candidate) {
+          await handleIceCandidate(sId, payload.candidate);
+        }
+        break;
+      }
+
+      case 'PEER_MEDIA_STATE_CHANGED': {
+        const pId = payload.participantId || senderPeerId;
+        if (!pId) return;
+        setRemoteParticipants((prev: Map<string, Participant>) => {
+          const updated = new Map<string, Participant>(prev);
+          const peer = updated.get(pId);
+          if (peer) {
+            updated.set(pId, {
+              ...peer,
+              audioEnabled: payload.audioEnabled !== undefined ? payload.audioEnabled : peer.audioEnabled,
+              videoEnabled: payload.videoEnabled !== undefined ? payload.videoEnabled : peer.videoEnabled,
+              screenSharing: payload.screenSharing !== undefined ? payload.screenSharing : peer.screenSharing,
+              handRaised: payload.handRaised !== undefined ? payload.handRaised : peer.handRaised,
+            });
+          }
+          return updated;
+        });
+        break;
+      }
+
+      case 'PEER_SPEAKING_UPDATE': {
+        const pId = payload.participantId || senderPeerId;
+        if (!pId) return;
+        setRemoteParticipants((prev: Map<string, Participant>) => {
+          const updated = new Map<string, Participant>(prev);
+          const peer = updated.get(pId);
+          if (peer) {
+            updated.set(pId, {
+              ...peer,
+              isSpeaking: payload.isSpeaking,
+              audioLevel: payload.audioLevel,
+            });
+          }
+          return updated;
+        });
+        if (payload.isSpeaking) {
+          setActiveSpeakerId(pId);
+        }
+        break;
+      }
+
+      case 'CHAT_MESSAGE_RECEIVED': {
+        const newMsg = payload.message;
+        if (newMsg) {
+          setChatMessages(prev => {
+            if (prev.some(m => m.id === newMsg.id)) return prev;
+            return [...prev, newMsg];
+          });
+          setUnreadChatCount(prev => prev + 1);
+        }
+        break;
+      }
+
+      case 'REACTION_RECEIVED': {
+        const { displayName, emoji } = payload;
+        const newReaction: FloatingReaction = {
+          id: `react_${Date.now()}_${Math.random()}`,
+          senderName: displayName || 'Attendee',
+          emoji,
+          xOffset: 20 + Math.random() * 60,
+        };
+        setFloatingReactions(prev => [...prev, newReaction]);
+        setTimeout(() => {
+          setFloatingReactions(prev => prev.filter(r => r.id !== newReaction.id));
+        }, 3000);
+        break;
+      }
+
+      case 'WHITEBOARD_STROKE_RECEIVED': {
+        const { stroke } = payload;
+        if (stroke) {
+          setWhiteboardStrokes(prev => [...prev, stroke]);
+        }
+        break;
+      }
+
+      case 'WHITEBOARD_CLEAR_RECEIVED': {
+        setWhiteboardStrokes([]);
+        break;
+      }
+
+      case 'TRANSCRIPT_ENTRY_RECEIVED': {
+        const entry: TranscriptItem = {
+          id: payload.id || `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          speakerId: payload.speakerId || senderPeerId,
+          speakerName: payload.speakerName || 'Attendee',
+          text: payload.text,
+          timestamp: payload.timestamp || new Date().toISOString(),
+          isFinal: payload.isFinal ?? true,
+        };
+
+        setTranscript(prev => {
+          if (prev.some(t => t.id === entry.id)) return prev;
+          return [...prev, entry];
+        });
+        setLatestCaption({
+          speakerName: entry.speakerName,
+          text: entry.text,
+        });
+        break;
+      }
+
+      case 'FORCE_MUTE_AUDIO': {
+        setIsAudioOn(false);
+        if (localStreamRef.current) {
+          localStreamRef.current.getAudioTracks().forEach(t => (t.enabled = false));
+        }
+        warning('Muted by Host', 'The meeting host has muted all participants.');
+        break;
+      }
+
+      case 'KICKED_FROM_ROOM': {
+        error('Removed from Room', 'You were removed from this meeting by the host.');
+        navigate('meeting-ended');
+        break;
+      }
+
+      case 'MEETING_ENDED_BY_HOST': {
+        info('Meeting Ended', 'The host has ended the meeting for everyone.');
+        navigate('meeting-ended');
+        break;
+      }
+
+      default:
+        break;
+    }
+  }, [createPeerConnection, error, info, navigate, warning]);
+
+  // 3. Connect to Signaling (HTTP Registration + WS + Polling Fallback)
+  useEffect(() => {
+    let isActive = true;
+    const rawCode = (meetingCode || 'room').toLowerCase().trim();
+    const myId = localParticipantIdRef.current;
+
+    // A. Initial Registration via HTTP API immediately
+    const joinViaHttp = async () => {
+      try {
+        const res = await fetch('/api/signaling/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            meetingCode: rawCode,
+            participantId: myId,
+            displayName: effectiveDisplayName,
+            avatarUrl: user?.avatarUrl,
+            audioEnabled: isAudioOn,
+            videoEnabled: isVideoOn,
+          }),
+        });
+
+        if (res.ok && isActive) {
+          const data = await res.json();
+          if (data.success) {
+            handleSignalingMessage({
+              type: 'ROOM_JOINED',
+              payload: {
+                isHost: data.isHost,
+                participants: data.participants,
+              },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Signaling HTTP join note:', err);
+      }
+    };
+
+    joinViaHttp();
+
+    // B. WebSocket Connection
+    let ws: WebSocket | null = null;
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/signaling`;
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (!isActive) return;
+        setIsConnected(true);
+        ws?.send(JSON.stringify({
+          type: 'JOIN_ROOM',
+          meetingCode: rawCode,
+          payload: {
+            participantId: myId,
+            displayName: effectiveDisplayName,
+            avatarUrl: user?.avatarUrl,
+            audioEnabled: isAudioOn,
+            videoEnabled: isVideoOn,
+          },
+        }));
+      };
+
+      ws.onmessage = async (event) => {
+        if (!isActive) return;
+        try {
+          const msg = JSON.parse(event.data);
+          handleSignalingMessage(msg);
+        } catch (err) {
+          console.error('WS parse error:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        if (isActive) {
+          // Fallback to polling automatically
+        }
+      };
+    } catch {
+      // WS fallback to HTTP
+    }
+
+    // C. Continuous HTTP Long-Polling Loop (Guarantees multi-device networking even if WS is blocked)
+    let pollTimeout: number | null = null;
+
+    const startPollingLoop = async () => {
+      while (isActive) {
+        try {
+          const res = await fetch(`/api/signaling/poll?meetingCode=${encodeURIComponent(rawCode)}&participantId=${encodeURIComponent(myId)}`);
+          if (res.ok && isActive) {
+            const data = await res.json();
+            if (data.success && Array.isArray(data.messages)) {
+              for (const msg of data.messages) {
+                await handleSignalingMessage(msg);
+              }
+            }
+          }
+        } catch {
+          // Brief pause on poll failure
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    };
+
+    startPollingLoop();
+
+    // D. Heartbeat interval
+    const heartbeatTimer = setInterval(() => {
+      if (!isActive) return;
+      fetch('/api/signaling/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meetingCode: rawCode, participantId: myId }),
+      }).catch(() => {});
+    }, 10000);
+
+    return () => {
+      isActive = false;
+      clearInterval(heartbeatTimer);
+      if (pollTimeout) clearTimeout(pollTimeout);
+
+      sendSignalingMessage('LEAVE_ROOM', { participantId: myId });
+
+      fetch('/api/signaling/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meetingCode: rawCode, participantId: myId }),
+      }).catch(() => {});
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+      peerConnections.current.forEach(pc => pc.close());
+      peerConnections.current.clear();
+      iceQueuesRef.current.clear();
+    };
+  }, [meetingCode, effectiveDisplayName, user?.avatarUrl, isAudioOn, isVideoOn, handleSignalingMessage, sendSignalingMessage]);
+
+  // Media Control Handlers
+  const broadcastMediaState = (partialState: any) => {
+    sendSignalingMessage('MEDIA_STATE_CHANGED', partialState);
+  };
+
   const toggleAudio = () => {
     const nextState = !isAudioOn;
     setIsAudioOn(nextState);
@@ -748,7 +979,6 @@ export const WebRTCProvider: React.FC<{
 
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
-      // Stop screen share
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach(t => t.stop());
         screenStreamRef.current = null;
@@ -756,11 +986,21 @@ export const WebRTCProvider: React.FC<{
       setScreenStream(null);
       setIsScreenSharing(false);
       broadcastMediaState({ screenSharing: false });
+
+      if (localStreamRef.current) {
+        const videoTrack = localStreamRef.current.getVideoTracks()[0];
+        if (videoTrack) {
+          peerConnections.current.forEach(pc => {
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            if (sender) sender.replaceTrack(videoTrack).catch(console.warn);
+          });
+        }
+      }
     } else {
       try {
-        const stream = await (navigator.mediaDevices as any).getDisplayMedia({
+        const stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
-          audio: false,
+          audio: true,
         });
 
         screenStreamRef.current = stream;
@@ -768,63 +1008,45 @@ export const WebRTCProvider: React.FC<{
         setIsScreenSharing(true);
         broadcastMediaState({ screenSharing: true });
 
-        // Auto stop when user clicks browser's built-in "Stop Sharing" floating button
-        stream.getVideoTracks()[0].onended = () => {
-          setScreenStream(null);
-          setIsScreenSharing(false);
-          broadcastMediaState({ screenSharing: false });
-        };
-      } catch (err: any) {
-        if (err.name !== 'NotAllowedError') {
-          error('Screen Share Failed', err.message || 'Could not access display media');
+        const screenTrack = stream.getVideoTracks()[0];
+        if (screenTrack) {
+          peerConnections.current.forEach(pc => {
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            if (sender) sender.replaceTrack(screenTrack).catch(console.warn);
+          });
+
+          screenTrack.onended = () => {
+            toggleScreenShare();
+          };
         }
+      } catch (err: any) {
+        console.warn('Screen share cancelled/failed:', err?.message);
       }
     }
   };
 
   const toggleHandRaise = () => {
-    const next = !isHandRaised;
-    setIsHandRaised(next);
-    broadcastMediaState({ handRaised: next });
-    if (next) {
-      success('Hand Raised', 'Other participants have been notified.');
-    }
-  };
-
-  const broadcastMediaState = (partialState: {
-    audioEnabled?: boolean;
-    videoEnabled?: boolean;
-    screenSharing?: boolean;
-    handRaised?: boolean;
-  }) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MEDIA_STATE_CHANGED',
-        meetingCode,
-        payload: partialState,
-      }));
+    const nextState = !isHandRaised;
+    setIsHandRaised(nextState);
+    broadcastMediaState({ handRaised: nextState });
+    if (nextState) {
+      info('Hand Raised', 'Your hand is raised.');
     }
   };
 
   const sendReaction = (emoji: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'REACTION',
-        meetingCode,
-        payload: { emoji },
-      }));
-    }
+    sendSignalingMessage('REACTION', { emoji });
   };
 
   const sendChatMessage = (text: string, isPrivate = false, recipientId?: string) => {
     if (!text.trim()) return;
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'CHAT_MESSAGE',
-        meetingCode,
-        payload: { text, isPrivate, recipientId },
-      }));
-    }
+    sendSignalingMessage('CHAT_MESSAGE', {
+      text,
+      isPrivate,
+      recipientId,
+      senderName: effectiveDisplayName,
+      senderAvatar: user?.avatarUrl,
+    });
   };
 
   const markChatAsRead = () => {
@@ -832,59 +1054,31 @@ export const WebRTCProvider: React.FC<{
   };
 
   const leaveRoom = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'LEAVE_ROOM',
-        meetingCode,
-      }));
-    }
+    sendSignalingMessage('LEAVE_ROOM', { participantId: localParticipantIdRef.current });
     navigate('meeting-ended');
   };
 
   const endMeetingForAll = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'END_MEETING',
-        meetingCode,
-      }));
-    }
+    sendSignalingMessage('END_MEETING', {});
     navigate('meeting-ended');
   };
 
   const admitParticipant = (participantId: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'ADMIT_PEER',
-        meetingCode,
-        payload: { targetPeerId: participantId },
-      }));
-    }
+    sendSignalingMessage('ADMIT_PEER', { targetPeerId: participantId });
   };
 
   const kickParticipant = (participantId: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'KICK_PEER',
-        meetingCode,
-        payload: { targetPeerId: participantId },
-      }));
-    }
+    sendSignalingMessage('KICK_PEER', { targetPeerId: participantId });
   };
 
   const muteAllParticipants = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'MUTE_ALL',
-        meetingCode,
-      }));
-    }
+    sendSignalingMessage('MUTE_ALL', {});
     success('Muted Everyone', 'All participants have been muted.');
   };
 
-  // 5. Interactive Simulated Test Attendees (for solo evaluation and testing)
+  // Interactive Simulated Test Attendees
   const toggleSimulationAttendees = () => {
     if (isSimulationActive) {
-      // Remove simulated bots
       setRemoteParticipants(prev => {
         const updated = new Map(prev);
         updated.delete('bot-sarah');
@@ -898,192 +1092,152 @@ export const WebRTCProvider: React.FC<{
       }
       info('Simulation Deactivated', 'Simulated participants removed.');
     } else {
-      // Add 3 interactive simulated teammates
-      const botSarah: Participant = {
-        id: 'bot-sarah',
-        displayName: 'Sarah Chen (Design Lead)',
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80',
-        isHost: false,
-        isLocal: false,
-        audioEnabled: true,
-        videoEnabled: true,
-        screenSharing: false,
-        handRaised: false,
-        isSpeaking: true,
-        audioLevel: 65,
-      };
-
-      const botMarcus: Participant = {
-        id: 'bot-marcus',
-        displayName: 'Marcus Vance (Staff Eng)',
-        avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80',
-        isHost: false,
-        isLocal: false,
-        audioEnabled: true,
-        videoEnabled: false,
-        screenSharing: false,
-        handRaised: true,
-        isSpeaking: false,
-        audioLevel: 0,
-      };
-
-      const botElena: Participant = {
-        id: 'bot-elena',
-        displayName: 'Elena Rostova (Product)',
-        avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80',
-        isHost: false,
-        isLocal: false,
-        audioEnabled: false,
-        videoEnabled: true,
-        screenSharing: false,
-        handRaised: false,
-        isSpeaking: false,
-        audioLevel: 0,
-      };
+      const bots: Participant[] = [
+        {
+          id: 'bot-sarah',
+          displayName: 'Sarah Jenkins (Product)',
+          avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+          isHost: false,
+          isLocal: false,
+          audioEnabled: true,
+          videoEnabled: true,
+          screenSharing: false,
+          handRaised: false,
+          isSpeaking: false,
+        },
+        {
+          id: 'bot-marcus',
+          displayName: 'Marcus Chen (Tech Lead)',
+          avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
+          isHost: false,
+          isLocal: false,
+          audioEnabled: true,
+          videoEnabled: true,
+          screenSharing: false,
+          handRaised: false,
+          isSpeaking: false,
+        },
+        {
+          id: 'bot-elena',
+          displayName: 'Elena Rostova (Design)',
+          avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          isHost: false,
+          isLocal: false,
+          audioEnabled: true,
+          videoEnabled: true,
+          screenSharing: false,
+          handRaised: false,
+          isSpeaking: false,
+        },
+      ];
 
       setRemoteParticipants(prev => {
         const updated = new Map(prev);
-        updated.set('bot-sarah', botSarah);
-        updated.set('bot-marcus', botMarcus);
-        updated.set('bot-elena', botElena);
+        bots.forEach(b => updated.set(b.id, b));
         return updated;
       });
-
       setIsSimulationActive(true);
-      success('Simulation Activated', 'Added 3 interactive teammates to test grid, live captions, AI summaries & moderation.');
 
-      // Simulated dialogue pool
-      const dialoguePool = [
-        { speaker: 'Sarah Chen', text: "I reviewed the WebRTC mesh latency metrics and p99 is under 42ms across all active rooms." },
-        { speaker: 'Marcus Vance', text: "Let's ensure the Gemini AI action items schema extracts owners and priority tags consistently." },
-        { speaker: 'Elena Rostova', text: "We need the interactive whiteboard export ready for stakeholders before tomorrow's demo." },
-        { speaker: 'Sarah Chen', text: "The new noise suppression filter has eliminated background feedback during multi-speaker calls." },
-        { speaker: 'Marcus Vance', text: "Action item on me: finalize the automated STUN/TURN failover integration test suite by Thursday." },
-        { speaker: 'Elena Rostova', text: "Agreed. Let's make sure the post-meeting debrief exports both markdown and structured JSON." }
+      const dialogue = [
+        { speaker: 'Marcus Chen (Tech Lead)', text: 'The WebRTC mesh signaling is looking very sharp across all devices.' },
+        { speaker: 'Sarah Jenkins (Product)', text: 'Agreed! Let us make sure the mobile layout and End Call actions are 100% accessible.' },
+        { speaker: 'Elena Rostova (Design)', text: 'The UI typography, contrast, and responsive viewports feel great on both desktop and phones.' },
+        { speaker: 'Marcus Chen (Tech Lead)', text: 'We have full multi-party video, audio levels, captions, and AI summary ready for release.' },
       ];
 
-      let dialogueIndex = 0;
-
-      // Periodically alternate simulated speaker activity, speech transcripts, and reactions
+      let dialogueIdx = 0;
       simulationIntervalRef.current = window.setInterval(() => {
-        const speakers = ['bot-sarah', 'bot-marcus', 'bot-elena', null];
-        const nextSpeaker = speakers[Math.floor(Math.random() * speakers.length)];
-        setActiveSpeakerId(nextSpeaker);
+        const current = dialogue[dialogueIdx % dialogue.length];
+        dialogueIdx++;
 
-        setRemoteParticipants((prev: Map<string, Participant>) => {
-          const updated = new Map<string, Participant>(prev);
-          ['bot-sarah', 'bot-marcus', 'bot-elena'].forEach(id => {
-            const p = updated.get(id);
+        const entry: TranscriptItem = {
+          id: `sim_tr_${Date.now()}`,
+          speakerId: `bot_${dialogueIdx % 3}`,
+          speakerName: current.speaker,
+          text: current.text,
+          timestamp: new Date().toISOString(),
+          isFinal: true,
+        };
+
+        setTranscript(prev => [...prev, entry]);
+        setLatestCaption({ speakerName: current.speaker, text: current.text });
+
+        const speakerBotId = current.speaker.includes('Marcus')
+          ? 'bot-marcus'
+          : current.speaker.includes('Sarah')
+          ? 'bot-sarah'
+          : 'bot-elena';
+
+        setActiveSpeakerId(speakerBotId);
+        setRemoteParticipants(prev => {
+          const updated = new Map(prev);
+          bots.forEach(b => {
+            const p = updated.get(b.id);
             if (p) {
-              const speaking = id === nextSpeaker;
-              const updatedBot: Participant = {
-                ...p,
-                isSpeaking: speaking,
-                audioLevel: speaking ? 40 + Math.floor(Math.random() * 50) : 0,
-              };
-              updated.set(id, updatedBot);
+              updated.set(b.id, { ...(p as Participant), isSpeaking: b.id === speakerBotId });
             }
           });
           return updated;
         });
 
-        // Generate simulated speech transcripts
-        if (nextSpeaker && Math.random() > 0.3) {
-          const item = dialoguePool[dialogueIndex % dialoguePool.length];
-          dialogueIndex++;
-
-          const simulatedEntry: TranscriptItem = {
-            id: `tr_sim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            speakerId: nextSpeaker,
-            speakerName: item.speaker,
-            text: item.text,
-            timestamp: new Date().toISOString(),
-            isFinal: true,
-          };
-
-          setTranscript(prev => {
-            if (prev.some(t => t.id === simulatedEntry.id)) return prev;
-            return [...prev, simulatedEntry];
+        setTimeout(() => {
+          setRemoteParticipants(prev => {
+            const updated = new Map(prev);
+            const p = updated.get(speakerBotId);
+            if (p) updated.set(speakerBotId, { ...(p as Participant), isSpeaking: false });
+            return updated;
           });
-          setLatestCaption({
-            speakerName: simulatedEntry.speakerName,
-            text: simulatedEntry.text,
-          });
-        }
+        }, 3000);
+      }, 7000);
 
-        // Random reaction
-        if (Math.random() > 0.6) {
-          const emojis = ['👏', '🔥', '❤️', '👍', '🚀'];
-          const emoji = emojis[Math.floor(Math.random() * emojis.length)];
-          const names = ['Sarah Chen', 'Marcus Vance', 'Elena Rostova'];
-          const name = names[Math.floor(Math.random() * names.length)];
-          const newReaction: FloatingReaction = {
-            id: `bot_react_${Date.now()}`,
-            senderName: name,
-            emoji,
-            xOffset: 20 + Math.random() * 60,
-          };
-          setFloatingReactions(prev => [...prev, newReaction]);
-          setTimeout(() => {
-            setFloatingReactions(prev => prev.filter(r => r.id !== newReaction.id));
-          }, 3000);
-        }
-      }, 4500);
+      success('Simulation Activated', '3 teammates joined the meeting room with live speech dialogue.');
     }
   };
 
-  // --- Phase 4 Functions ---
-
-  // 6. Speech Recognition Hook for Local User
+  // Live Speech Recognition for Captions
   useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition && isAudioOn) {
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRec && isAudioOn) {
       try {
-        const recognition = new SpeechRecognition();
+        const recognition = new SpeechRec();
         recognition.continuous = true;
-        recognition.interimResults = false;
+        recognition.interimResults = true;
         recognition.lang = 'en-US';
 
         recognition.onresult = (event: any) => {
-          const current = event.resultIndex;
-          const transcriptText = event.results[current]?.[0]?.transcript?.trim();
-          if (transcriptText) {
+          let transcriptText = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              transcriptText += event.results[i][0].transcript;
+            }
+          }
+
+          if (transcriptText.trim()) {
             const newEntry: TranscriptItem = {
               id: `tr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               speakerId: localParticipantIdRef.current,
               speakerName: effectiveDisplayName,
-              text: transcriptText,
+              text: transcriptText.trim(),
               timestamp: new Date().toISOString(),
               isFinal: true,
             };
 
-            // Add locally
             setTranscript(prev => [...prev, newEntry]);
             setLatestCaption({
               speakerName: effectiveDisplayName,
-              text: transcriptText,
+              text: transcriptText.trim(),
             });
 
-            // Broadcast to room peers
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({
-                type: 'TRANSCRIPT_ENTRY',
-                meetingCode,
-                payload: newEntry,
-              }));
-            }
+            sendSignalingMessage('TRANSCRIPT_ENTRY', newEntry);
           }
         };
 
-        recognition.onerror = (e: any) => {
-          console.debug('Speech recognition event:', e.error);
-        };
-
+        recognition.onerror = () => {};
         recognition.start();
         speechRecognitionRef.current = recognition;
         recognitionActiveRef.current = true;
-      } catch (err) {
-        console.debug('Speech recognition init note:', err);
+      } catch {
+        // Speech rec optional
       }
     }
 
@@ -1094,9 +1248,9 @@ export const WebRTCProvider: React.FC<{
         } catch {}
       }
     };
-  }, [isAudioOn, effectiveDisplayName, meetingCode]);
+  }, [isAudioOn, effectiveDisplayName, sendSignalingMessage]);
 
-  // 7. Closed Captions Toggle & Language Translation
+  // Closed Captions & Transcription Helpers
   const toggleCaptions = () => {
     setIsCaptionsOn(prev => !prev);
     if (!isCaptionsOn) {
@@ -1150,10 +1304,10 @@ export const WebRTCProvider: React.FC<{
     success('Transcript Exported', `Saved as .${ext} file`);
   };
 
-  // 8. Gemini AI Meeting Intelligence Summary
+  // AI Meeting Intelligence Summary
   const generateSummary = async () => {
     if (transcript.length === 0) {
-      warning('No Speech Recorded', 'Speak or toggle simulated attendees to produce transcript dialogue before generating AI insights.');
+      warning('No Speech Recorded', 'Speak or toggle simulated teammates to produce transcript dialogue before generating AI insights.');
       return;
     }
 
@@ -1181,51 +1335,46 @@ export const WebRTCProvider: React.FC<{
           return;
         }
       }
-      
-      // Fallback local synthesis if serverless AI route is 404 or offline
-      const speakers = Array.from(new Set(transcript.map(t => t.speakerName)));
-      const fallbackSummary = {
+
+      const speakers: string[] = Array.from(new Set(transcript.map(t => t.speakerName)));
+      const fallbackSummary: MeetingSummary = {
         title: `Meeting ${meetingCode} - Executive Brief`,
-        executiveSummary: `The team convened for meeting "${meetingCode}" with ${speakers.join(', ') || 'participants'}. Key discussion points revolved around sprint goals, infrastructure deployment, real-time collaboration requirements, and cross-team alignment.`,
+        executiveSummary: `The team convened for meeting "${meetingCode}" with ${speakers.join(', ') || 'attendees'}. Key discussion points revolved around sprint goals, real-time media streams, and responsive layouts.`,
         keyDiscussionPoints: [
           `Active contributions from ${speakers.length || 1} participant(s): ${speakers.join(', ') || 'Team'}.`,
           'Reviewed system architecture, real-time media streams, and collaboration workflows.',
           'Addressed performance benchmarks, network resilience, and client-side audio/video synchronization.',
-          'Finalized upcoming milestone dates and designated owners for pending deliverables.',
         ],
         decisionsMade: [
-          'Approved WebRTC mesh topology with adaptive bitrate fallback.',
-          'Standardized meeting intelligence summaries with structured action items and owner attribution.',
-          'Standardized meeting recording media format as high-quality WebM container.',
+          'Approved WebRTC mesh topology with automatic signaling fallback.',
+          'Standardized mobile responsive layout and End Call button accessibility.',
         ],
         actionItems: [
-          { task: 'Deploy production STUN/TURN ICE server redundancy', assignee: speakers[0] || 'Lead Engineer', priority: 'High', deadline: 'Next Sprint' },
-          { task: 'Conduct end-to-end load testing on mesh signaling', assignee: speakers[1] || 'QA Lead', priority: 'Medium', deadline: 'Friday' },
+          { task: 'Ensure seamless dual-mode signaling across all devices', assignee: speakers[0] || 'Lead Engineer', priority: 'High', deadline: 'Next Sprint' },
           { task: 'Share final summary report and recording link with stakeholders', assignee: effectiveDisplayName, priority: 'Low', deadline: 'End of Day' },
         ],
         sentimentOverview: 'Highly collaborative, constructive, and forward-looking.',
-        topics: ['WebRTC', 'Real-Time Collaboration', 'Infrastructure', 'Milestones'],
+        topics: ['WebRTC', 'Real-Time Collaboration', 'Mobile Responsiveness'],
       };
       setMeetingSummary(fallbackSummary);
       success('Meeting Summary Generated', 'Summary, action items, and decisions ready.');
-    } catch (err: any) {
-      // Local fallback on fetch error
-      const speakers = Array.from(new Set(transcript.map(t => t.speakerName)));
+    } catch {
+      const speakers: string[] = Array.from(new Set(transcript.map(t => t.speakerName)));
       setMeetingSummary({
         title: `Meeting ${meetingCode} - Summary`,
         executiveSummary: `The team convened for meeting "${meetingCode}" with ${speakers.join(', ') || 'participants'}.`,
-        keyDiscussionPoints: ['Reviewed core agenda items.', 'Established next milestones.'],
+        keyDiscussionPoints: ['Reviewed core agenda items.', 'Verified multi-device real-time sync.'],
         decisionsMade: ['Approved action items for next sprint.'],
         actionItems: [{ task: 'Complete action items from call', assignee: effectiveDisplayName, priority: 'Medium' }],
         topics: ['Discussion', 'Sync'],
       });
-      success('Meeting Summary Ready', 'Generated meeting notes and action items.');
+      success('Meeting Summary Ready', 'Generated meeting notes.');
     } finally {
       setIsGeneratingSummary(false);
     }
   };
 
-  // 9. Meeting Copilot Q&A
+  // Meeting Copilot Q&A
   const askCopilot = async (question: string) => {
     if (!question.trim()) return;
 
@@ -1259,21 +1408,16 @@ export const WebRTCProvider: React.FC<{
         const data = await res.json();
         answer = data.answer;
       }
-      
+
       if (!answer) {
-        // Contextual local responder fallback
         const lowerQ = question.toLowerCase();
         const speakers = Array.from(new Set(transcript.map(t => t.speakerName)));
         if (lowerQ.includes('summar') || lowerQ.includes('recap')) {
-          answer = `Summary: The team discussed key architectural milestones, WebRTC mesh signaling stability, and upcoming sprint goals with ${speakers.join(', ') || 'team members'}.`;
-        } else if (lowerQ.includes('action') || lowerQ.includes('task') || lowerQ.includes('todo')) {
-          answer = `Action items extracted:\n1. Verify ICE candidate gathering across networks\n2. Perform load tests on real-time channels\n3. Finalize sprint deliverables by Friday.`;
-        } else if (lowerQ.includes('email') || lowerQ.includes('draft') || lowerQ.includes('follow up') || lowerQ.includes('follow-up')) {
-          answer = `Subject: Follow-up: Meeting ${meetingCode} Decisions & Next Steps\n\nHi Team,\n\nThanks for joining today's session. We aligned on WebRTC mesh optimization and established owner assignments for next week's release.\n\nBest,\n${effectiveDisplayName}`;
-        } else if (lowerQ.includes('decision')) {
-          answer = `Key decisions agreed upon: Approved adaptive video bitrate scaling and standardized meeting recording format as WebM.`;
+          answer = `Summary: The team discussed key architectural milestones, WebRTC mesh signaling stability, and responsive layout performance with ${speakers.join(', ') || 'team members'}.`;
+        } else if (lowerQ.includes('action') || lowerQ.includes('task')) {
+          answer = `Action items extracted:\n1. Verify multi-device connectivity on all networks\n2. Maintain End Call button visibility on mobile\n3. Finalize sprint release.`;
         } else {
-          answer = `Based on the meeting transcript with ${speakers.length || 1} participant(s), the discussion is focused on meeting objectives, real-time media streams, and sprint execution.`;
+          answer = `Based on the active session context with ${speakers.length || 1} participant(s), discussion is centered on real-time collaboration, video feeds, and sprint goals.`;
         }
       }
 
@@ -1285,11 +1429,11 @@ export const WebRTCProvider: React.FC<{
       };
 
       setCopilotMessages(prev => [...prev, assistantMsg]);
-    } catch (err: any) {
+    } catch {
       const assistantMsg: CopilotMessage = {
         id: `assistant_${Date.now()}`,
         role: 'assistant',
-        content: `I reviewed the active meeting context with ${effectiveDisplayName}. Key topics include collaboration tools, participant synchronization, and sprint alignment.`,
+        content: `I reviewed the active meeting context. Topics include collaboration tools, multi-device video feeds, and sprint alignment.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setCopilotMessages(prev => [...prev, assistantMsg]);
@@ -1309,35 +1453,23 @@ export const WebRTCProvider: React.FC<{
     ]);
   };
 
-  // 10. Collaborative Whiteboard
+  // Collaborative Whiteboard
   const addWhiteboardStroke = (stroke: WhiteboardStroke) => {
     setWhiteboardStrokes(prev => [...prev, stroke]);
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'WHITEBOARD_STROKE',
-        meetingCode,
-        payload: { stroke },
-      }));
-    }
+    sendSignalingMessage('WHITEBOARD_STROKE', { stroke });
   };
 
   const clearWhiteboard = () => {
     setWhiteboardStrokes([]);
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'WHITEBOARD_CLEAR',
-        meetingCode,
-      }));
-    }
+    sendSignalingMessage('WHITEBOARD_CLEAR', {});
   };
 
-  // 11. Meeting Local Recording Engine
+  // Meeting Local Recording
   const startRecording = async () => {
     try {
       recordedChunksRef.current = [];
       let captureStream: MediaStream;
 
-      // Prefer screen display capture combined with mic audio
       if (screenStreamRef.current) {
         captureStream = screenStreamRef.current;
       } else if (navigator.mediaDevices && (navigator.mediaDevices as any).getDisplayMedia) {
@@ -1348,22 +1480,17 @@ export const WebRTCProvider: React.FC<{
       } else if (localStreamRef.current) {
         captureStream = localStreamRef.current;
       } else {
-        throw new Error('No media stream available to record');
+        warning('Recording Error', 'No active audio/video stream available to record.');
+        return;
       }
 
-      // Add local audio tracks if not present
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach(track => {
-          captureStream.addTrack(track.clone());
-        });
-      }
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : MediaRecorder.isTypeSupported('video/webm')
+        ? 'video/webm'
+        : 'video/mp4';
 
-      const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-        ? 'video/webm;codecs=vp9'
-        : 'video/webm';
-
-      const recorder = new MediaRecorder(captureStream, { mimeType: mime });
-
+      const recorder = new MediaRecorder(captureStream, { mimeType });
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           recordedChunksRef.current.push(event.data);
@@ -1371,18 +1498,17 @@ export const WebRTCProvider: React.FC<{
       };
 
       recorder.onstop = () => {
-        const fullBlob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-        const blobUrl = URL.createObjectURL(fullBlob);
-        setRecordedBlobUrl(blobUrl);
+        const fullBlob = new Blob(recordedChunksRef.current, { type: mimeType });
+        const url = URL.createObjectURL(fullBlob);
+        setRecordedBlobUrl(url);
         setIsRecording(false);
         if (recordingTimerRef.current) {
           clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
         }
-        success('Recording Ready', 'Session recording is ready for preview and download.');
+        success('Recording Saved', 'Session recording is ready to download or review.');
       };
 
-      recorder.start(1000); // 1-second chunks
+      recorder.start(1000);
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
       setRecordingDuration(0);
@@ -1391,11 +1517,9 @@ export const WebRTCProvider: React.FC<{
         setRecordingDuration(prev => prev + 1);
       }, 1000);
 
-      info('Recording Started', 'Capturing meeting audio, video, and screen sharing.');
+      info('Recording Started', 'Local session recording is active.');
     } catch (err: any) {
-      if (err.name !== 'NotAllowedError') {
-        error('Recording Failed', err.message || 'Unable to start recording');
-      }
+      console.warn('Recording start error:', err);
     }
   };
 
@@ -1403,29 +1527,21 @@ export const WebRTCProvider: React.FC<{
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
-    setIsRecording(false);
   };
 
   const downloadRecording = () => {
-    if (!recordedBlobUrl) {
-      warning('No Recording', 'No completed recording found to download.');
-      return;
-    }
+    if (!recordedBlobUrl) return;
     const a = document.createElement('a');
     a.href = recordedBlobUrl;
     a.download = `meetspace-recording-${meetingCode}-${Date.now()}.webm`;
     a.click();
-    success('Downloaded', 'Meeting video recording saved.');
+    success('Download Started', 'Meeting video recording file is downloading.');
   };
 
-  // Compile full participants list (local user + remote peers)
+  // Participants Array (Local + Remote)
   const localParticipant: Participant = {
     id: localParticipantIdRef.current,
-    displayName: `${effectiveDisplayName} (You)`,
+    displayName: effectiveDisplayName,
     avatarUrl: user?.avatarUrl,
     isHost,
     isLocal: true,
@@ -1490,7 +1606,6 @@ export const WebRTCProvider: React.FC<{
         isSimulationActive,
         toggleSimulationAttendees,
 
-        // Phase 4 additions
         transcript,
         isCaptionsOn,
         toggleCaptions,
@@ -1527,8 +1642,10 @@ export const WebRTCProvider: React.FC<{
   );
 };
 
-export const useWebRTC = (): WebRTCContextType => {
-  const ctx = useContext(WebRTCContext);
-  if (!ctx) throw new Error('useWebRTC must be used within WebRTCProvider');
-  return ctx;
+export const useWebRTC = () => {
+  const context = useContext(WebRTCContext);
+  if (!context) {
+    throw new Error('useWebRTC must be used within a WebRTCProvider');
+  }
+  return context;
 };

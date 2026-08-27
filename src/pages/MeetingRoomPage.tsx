@@ -145,7 +145,7 @@ export const MeetingRoomPage: React.FC = () => {
     participants[0];
 
   return (
-    <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans">
+    <div className="fixed inset-0 w-full h-full min-h-[100dvh] max-h-[100dvh] h-[100dvh] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans z-50">
       {/* Floating Reaction Particles */}
       <FloatingReactions reactions={floatingReactions} />
 

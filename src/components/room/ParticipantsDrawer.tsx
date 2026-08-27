@@ -45,7 +45,7 @@ export const ParticipantsDrawer: React.FC<ParticipantsDrawerProps> = ({ isOpen, 
   };
 
   return (
-    <div className="w-full sm:w-80 md:w-96 bg-slate-900/95 backdrop-blur-xl border-l border-slate-800 flex flex-col h-full z-40 shadow-2xl transition-all">
+    <div className="absolute sm:relative inset-y-0 right-0 w-full sm:w-80 md:w-96 bg-slate-900/98 backdrop-blur-2xl border-l border-slate-800 flex flex-col h-full z-40 shadow-2xl transition-all">
       
       {/* Header */}
       <div className="p-4 border-b border-slate-800 flex items-center justify-between">
